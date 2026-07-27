@@ -75,6 +75,37 @@ Script JS (determinístico, corre en background):
 
 **Principio de elección (grilling 2026-07-16): modelo mínimo suficiente.** Dentro del rango del rol, el orquestador elige el tier más barato que cumple la vara de correctitud del nodo; escala solo donde el error es caro o irreversible. Doble objetivo explícito: máxima correctitud Y eficiencia de tokens (junto con el tope de presupuesto de §6.5).
 
+### 3.1b Effort por rol — y dónde está REALMENTE el costo
+
+El effort es configurable por rol (`role_efforts` → `args.efforts`) y por issue (`args.issueEfforts`), con estos defaults en el motor:
+
+| Rol | Effort default | Por qué |
+|---|---|---|
+| scout, validator, **serializer** | `low` | ejecutan (gh/git/tests) y reportan números; no hay juicio que comprar |
+| implementer, applier | `medium` | escriben código bajo gate numérico; el retry cubre el resto |
+| resolver, particionador, reviewer, judge | `high` | **error asimétrico**: el gate es puramente numérico (§3.3), así que un falso negativo del reviewer no lo recupera nadie aguas abajo |
+
+**Autopsia de 4 corridas reales (2026-07-27, App.SaltaCompra — método: `usage` por agente en `~/.claude/projects/*/subagents/workflows/wf_*/agent-*.jsonl`, clasificado por prompt):**
+
+| corrida | agentes | sumidero #1 | #2 | output total | cache read total |
+|---|---|---|---|---|---|
+| `wf_a7c1fe07` (sin review) | 24 | implementer 74% | validator 8% | 178k | 90M |
+| `wf_8ced6020` | 52 | implementer 38% | reviewer×15 31% | 457k | 215M |
+| `wf_567c7c63` | 44 | **applier 39% (1 agente)** | reviewer×13 34% | 408k | 198M |
+| `wf_d04b8e8f` | 31 | reviewer×13 64% | serializer 11% | 187k | 47M |
+
+**Conclusión dura: el costo escala con `turnos × contexto acumulado`, no con el effort.** El contexto se re-envía entero en cada turno, así que un agente maratónico paga cuadrático:
+
+| agente | turnos | contexto (mediana→max) | costo |
+|---|---|---|---|
+| reviewer (c/u) | 19-33 | 68k → 88k | 1-3M |
+| implementer #392 | 269 | 343k → 437k | **79M** (> los 13 reviewers juntos) |
+| applier (prd0019) | 491 | 193k → 462k | **115M** |
+
+En `wf_d04b8e8f` los reviewers pesan 64% del total pero su output ponderado es ~6,5%: **apagarles todo el razonamiento ahorraría ~6%**. Por eso las palancas del motor son, en orden: (1) trocear agentes maratónicos (§3.7c), (2) pre-filtrar lo que cada agente lee (§3.7b), (3) disciplina de contexto en el prompt de los que escriben código (reporters silenciosos, no releer, leer rangos), y recién después (4) el effort. Confirma y generaliza el hallazgo del Piloto 1 (§3.1): *el tier del modelo importa menos que la cantidad de nodos y re-lecturas*.
+
+**Regla:** el effort se ajusta cuando el TRABAJO lo justifica (tanda mecánica → `low`), nunca como medida de ahorro — degradar `reviewer`/`judge` compra ~6% pagando con la única detección no-numérica del pipeline.
+
 ### 3.2 Doctrina "host owns all mutations" → etapa serializadora
 
 El script no tiene FS/git. La doctrina se re-expresa: **toda mutación remota corre en agentes `serializer` despachados secuencialmente por el script** (`await` uno por uno — el orden lo garantiza el código, no la disciplina del modelo). Los implementers siguen sin poder pushear (constraint triple-declarado en su prompt, como hoy).
@@ -132,6 +163,16 @@ Restricción heredada: sin `Date.now()` en el script → timestamps entran por `
 **DECIDIDO (grilling 2026-07-16, opción A):** fase nativa del workflow — reviewers (fan-out por superficie) → judge → appliers, con los prompts de review-fleet PORTADOS a host-orchestrator, sobre el diff integrado `prd/X..base`. Los fixes aprobados van en UN commit/PR `review/<slug>` → `prd/X` que pasa por el mismo gate. Motor autocontenido y publicable; la revisión hereda pinneo de modelos, orden y presupuesto.
 
 Contexto de la decisión: la v4 tiene vocación de **reemplazar el flujo de implementación paralela autónoma completo** — la duplicación de prompts con engineering-workflow es transitoria, no deuda permanente. La versión interactiva de review-fleet sigue existiendo para uso manual.
+
+**La cobertura de la fleet NO es palanca de ahorro (decidido 2026-07-27).** El número de unidades (≤6), las 2 lentes por unidad y el reviewer de integración se mantienen: el gate es puramente numérico (typecheck + tests + ratchet), así que la fleet es lo único que ve arquitectura, seams, OWASP y contratos cruzados antes del PR final draft. Y el judge filtra falsos positivos pero **no puede recuperar falsos negativos**: lo que el reviewer nunca vio, nadie lo ve. El ahorro sale de §3.7b y §3.7c, que no tocan qué se mira.
+
+#### 3.7b Alcance de lectura pre-filtrado
+
+Cada reviewer corre `git diff origin/<base>...HEAD -- <paths de SU unidad>` en vez del diff integrado completo (fallback `.` si el particionador no reportó paths: degrada el ahorro, nunca la cobertura). Sin esto, los 13-15 reviewers releen el mismo diff completo y cada uno paga ~2,5M de contexto. Mismas unidades, mismas lentes, mismo modelo: solo se deja de pagar N veces lo mismo.
+
+#### 3.7c Applier por tandas
+
+El applier aplica los fixes del juez en tandas de `applier_chunk` (default 4). La tanda 1 crea el worktree aislado (`review/<runLabel>`); las siguientes hacen `cd` al mismo worktree y branch, con **contexto fresco**, y el script acumula `aplicadas`/`falladas`. Si una tanda muere, lo aplicado se conserva y los fixes de esa tanda van a `humano`. Motivo (autopsia §3.1b): el applier único de la corrida `prd0019-0722` corrió 491 turnos con el contexto creciendo de 44k a 462k → 115M de tokens leídos, 39% del costo de la corrida entera en un solo agente. Mismos fixes, mismo orden, mismo gate.
 
 ### 3.8 Entrada, `cc-afk` y permisos
 

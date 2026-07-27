@@ -67,6 +67,28 @@ const A = parseArgs(args)
 
 const M = A.models
 const T = A.tiers
+
+// §3.1b — EFFORT por rol (config `role_efforts` → args.efforts; override por issue en
+// args.issueEfforts). Los defaults salen de la autopsia de 4 corridas reales (2026-07-27):
+// el costo de una corrida NO escala con el effort sino con turnos × contexto acumulado
+// (output total por corrida: 187k-457k; cache read: 47M-215M). Bajar effort mueve ~6%.
+// Por eso: los roles EJECUTORES (serializer: corre gh/git check-then-act) van a 'low'
+// —no razonan, ejecutan—, y los roles de JUICIO (reviewer/judge/particionador/resolver)
+// se quedan en 'high': ahí el error es asimétrico (un falso negativo del reviewer no lo
+// recupera nadie después, el gate es puramente numérico) y su output pesa ~6% del total.
+const EFFORT_DEFAULT = {
+  scout: 'low',
+  validator: 'low',
+  serializer: 'low',
+  implementer: 'medium',
+  resolver: 'high',
+  particionador: 'high',
+  reviewer: 'high',
+  judge: 'high',
+  applier: 'medium',
+}
+const E = { ...EFFORT_DEFAULT, ...(A.efforts ?? {}) }
+const effortDeIssue = (n) => A.issueEfforts?.[String(n)] ?? E.implementer
 const REPO = A.repo
 const RAMA = A.rama
 const BASE = A.base
@@ -314,7 +336,7 @@ ${hook}
 3. Corré la suite de tests del repo (timeout 420000) → tests_failed = conteo de tests fallidos, failing_test_files = paths de archivos de test con fallas. Todo verde → 0 y lista vacía.
 ${diff}
 Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
-    { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: 'low', schema: MEDICION_SCHEMA }
+    { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, schema: MEDICION_SCHEMA }
   ).then((r) => {
     // §3.3 — el contrato de metrics es CERRADO: solo las claves de la whitelist
     // (args.metricKeys, default typecheck_errors), CON o SIN hook. Un validator que
@@ -340,7 +362,7 @@ function serializar(tarea, etiqueta, faseTag) {
     label: `serializer:${etiqueta}`,
     phase: faseTag,
     model: M[T.serializer],
-    effort: 'medium',
+    effort: E.serializer,
     schema: SERIALIZER_SCHEMA,
   })
 }
@@ -357,7 +379,7 @@ IMPORTANTE: reportá tu recomendación por el output estructurado (schema), no p
       label: `resolver:${etiqueta}`,
       phase: faseTag,
       model: M[T.resolver],
-      effort: 'high',
+      effort: E.resolver,
       agentType: 'host-orchestrator:merge-resolver',
       schema: RESOLVER_SCHEMA,
     }
@@ -374,6 +396,7 @@ log(
     `${A.budgetTotal ? ' (por args)' : budget.total ? ' (por directiva)' : ''} — ts=${A.ts}`
 )
 log(`tiers: ${Object.entries(T).map(([r, t]) => `${r}=${t}→${M[t]}`).join(' ')}`)
+log(`efforts: ${Object.entries(E).map(([r, e]) => `${r}=${e}`).join(' ')}`)
 
 const setup = await serializar(
   `Preparar la rama integradora del pipeline:
@@ -432,7 +455,7 @@ for (let wave = 1; wave <= A.maxWaves; wave++) {
 4. all_done = ¿todas DONE o HUMAN_GATED sin nada accionable? → all_done=true SOLO si no queda NADA accionable (ni MERGE_READY ni IMPLEMENTABLE ni IN_REVIEW) y hay al menos una DONE.
 
 Reportá por schema. En 'detalle' de cada issue: 1 línea con la evidencia del bucket.${suf}`,
-    { label: `scout:w${wave}`, phase: FASE, model: M[T.scout], effort: 'low', schema: SCOUT_SCHEMA }
+    { label: `scout:w${wave}`, phase: FASE, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
   )
   if (!scout) {
     log(`✖ scout de la wave ${wave} murió — ABORT`)
@@ -635,7 +658,8 @@ ${prep?.detalle ?? 'sin detalle'}`,
 // --- implementer + gate por issue (cadena secuencial; corre en paralelo entre issues)
 async function implementarConGate(iss, FASE, deny) {
   const tier = A.issueTiers?.[String(iss.number)] ?? T.implementer
-  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]})`)
+  const esfuerzo = effortDeIssue(iss.number)
+  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]}, effort ${esfuerzo})`)
   const impl = await llamar(
     (suf) => `Implementá la issue #${iss.number} ("${iss.title}") del repo en tu worktree AISLADO (tu cwd). No salgas de él.
 
@@ -649,12 +673,23 @@ PASO 4: git add -A && git commit (mensaje descriptivo). NO pushees, NO gh pr cre
 Si un error destapa un BUG REAL preexistente: NO lo arregles, anotalo en bugs_reales.
 Si el brief es inimplementable/ambiguo: explicalo en 'bloqueado' y NO inventes.
 
+DISCIPLINA DE CONTEXTO (no es cosmético: tu contexto se re-envía entero en CADA turno, así que
+lo que arrastrás lo pagás N veces — medido 2026-07-27: un implementer de 269 turnos costó 79M de
+tokens leídos, más que 13 reviewers juntos):
+  - Corré typecheck y tests con el reporter MÁS SILENCIOSO que tenga el runner (p.ej. --reporter=dot,
+    -q, --quiet) y filtrá la salida a lo accionable (\`| tail -40\`, \`grep -A5 -i 'fail\\|error'\`).
+    NUNCA vuelques suites verdes completas ni logs de build enteros.
+  - Mientras iterás en rojo, corré SOLO los tests del archivo/área que estás tocando; la suite
+    completa va una vez al final (PASO 3) — el pipeline la vuelve a correr igual con un medidor aparte.
+  - No releas un archivo que ya leíste: editá con el contenido que ya tenés en contexto.
+  - No hagas \`cat\` de archivos largos ni \`git diff\` completos para "chequear": leé rangos.
+
 Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, branch, resumen, bugs_reales, bloqueado.${suf}`,
     {
       label: `implementer:#${iss.number}`,
       phase: FASE,
       model: M[tier],
-      effort: 'medium',
+      effort: esfuerzo,
       isolation: 'worktree',
       agentType: 'host-orchestrator:parallel-implementer',
       schema: IMPL_SCHEMA,
@@ -672,7 +707,7 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
 El gate (comparación numérica contra el baseline de la wave) falló por:
 ${g.motivos.map((m) => `  - ${m}`).join('\n')}
 Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, commit local al final).${suf}`,
-      { label: `retry:#${iss.number}`, phase: FASE, model: M[tier], effort: 'medium', schema: IMPL_SCHEMA }
+      { label: `retry:#${iss.number}`, phase: FASE, model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
     )
     med = await medir(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
     g = gate(med, baseMetrics)
@@ -699,7 +734,7 @@ if (allDone) {
 2. Estudiá el diff INTEGRADO completo: git diff origin/${BASE}...HEAD — como un todo, no PR por PR: mapa de módulos tocados, seams nuevos, contratos cambiados, estado compartido. Leé CONTEXT.md y docs/adr/ si existen.
 3. Particioná en unidades de review = superficies cohesivas del estado FINAL (módulo + sus seams, ~≤1.5k líneas relevantes por unidad, máx 6). Las fronteras salen del dominio y la estructura del repo, NUNCA de cómo se despachó el trabajo (waves/issues son artefactos de scheduling).
 Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}`,
-      { label: 'review:particion', phase: 'Review', model: M[T.reviewer], effort: 'high', schema: PARTICION_SCHEMA }
+      { label: 'review:particion', phase: 'Review', model: M[T.reviewer], effort: E.particionador, schema: PARTICION_SCHEMA }
     )
     if (!part) {
       log('✖ particionador murió — review salteada')
@@ -713,12 +748,25 @@ Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}
         { key: 'arch', desc: 'ARQUITECTURA (lente deep-modules): profundidad de módulos, seams, deletion test, interfaz-como-superficie-de-test. ¿La unidad es un módulo profundo o una fachada rota?' },
         { key: 'impl', desc: 'IMPLEMENTACIÓN CRÍTICA: bugs de correctitud, seguridad (OWASP), manejo de errores, consistencia con las convenciones del repo, code smells con consecuencia real.' },
       ]
+      // El alcance de lectura de cada reviewer se PRE-FILTRA a los paths de su unidad
+      // (§3.7b): sin esto los 13-15 reviewers releen el diff integrado completo y cada
+      // uno paga ~2.5M de contexto. Restringir el `git diff` NO recorta cobertura —
+      // mismas unidades, mismas lentes, mismo modelo: solo deja de pagarse N veces el
+      // mismo diff. La unidad de integración sí ve todos los paths (los seams son su tema).
+      // '.' = fallback si el particionador no reportó paths para la unidad (= diff completo,
+      // el comportamiento previo): degrada el ahorro, nunca la cobertura.
+      const pathspec = (paths) => (paths ?? []).map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(' ') || '.'
       const trabajos = unidades.flatMap((u) =>
-        lentes.map((l) => ({ etiqueta: `${l.key}:${u.nombre}`, prompt: `Unidad "${u.nombre}" (paths: ${u.paths.join(', ')}; seams: ${u.seams ?? 'n/a'}). Lente ${l.desc}` }))
+        lentes.map((l) => ({
+          etiqueta: `${l.key}:${u.nombre}`,
+          paths: u.paths,
+          prompt: `Unidad "${u.nombre}" (paths: ${u.paths.join(', ')}; seams: ${u.seams ?? 'n/a'}). Lente ${l.desc}`,
+        }))
       )
       if (unidades.length > 1)
         trabajos.push({
           etiqueta: 'integracion',
+          paths: [...new Set(unidades.flatMap((u) => u.paths ?? []))],
           prompt: `SOLO los SEAMS ENTRE unidades (contratos, flujo de datos, invariantes cruzadas) que surgen de este análisis integral: ${part.analisis}. Los reviewers por unidad no ven esto; acá es donde se rompen las implementaciones multi-wave.`,
         })
 
@@ -728,10 +776,14 @@ Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}
             llamar(
               (suf) => `Sos un REVIEWER read-only del diff integrado ${BASE}...${RAMA}.
 1. cd ${WT_INTEGRACION} (NO modifiques NADA)
-2. Base del review: git diff origin/${BASE}...HEAD restringido a tu alcance. Leé CONTEXT.md/ADRs si existen.
+2. Base del review — SOLO tu alcance, ya pre-filtrado:
+   git diff origin/${BASE}...HEAD -- ${pathspec(t.paths)}
+   NO corras el git diff completo del repo: otros reviewers cubren el resto en paralelo.
+   Leé CONTEXT.md/ADRs si existen, y abrí archivos fuera de tu alcance SOLO si necesitás
+   entender un contrato que tu diff consume (rangos, no archivos enteros).
 3. Tu alcance y lente: ${t.prompt}
 Reportá findings ESTRUCTURADOS (título · file:line · severidad alta/media/baja · por qué importa · fix propuesto). Sin prosa. Lista vacía si no hay nada real — no inventes hallazgos para justificarte.${suf}`,
-              { label: `review:${t.etiqueta}`, phase: 'Review', model: M[T.reviewer], effort: 'high', schema: FINDINGS_SCHEMA }
+              { label: `review:${t.etiqueta}`, phase: 'Review', model: M[T.reviewer], effort: E.reviewer, schema: FINDINGS_SCHEMA }
             )
           )
         )
@@ -756,7 +808,7 @@ Tu deber:
 - Pesá: ¿es real (no especulativo)? ¿está en scope? ¿el riesgo del fix supera su beneficio? ¿contradice un ADR o CONTEXT.md?
 - Ordená la lista APLICAR: independientes primero, dependientes al final.
 Vos NO editás código.${suf}`,
-            { label: 'review:judge', phase: 'Review', model: M[T.judge], effort: 'high', schema: JUICIO_SCHEMA }
+            { label: 'review:judge', phase: 'Review', model: M[T.judge], effort: E.judge, schema: JUICIO_SCHEMA }
           )) ?? juicio
       }
       log(`judge: ${juicio.aplicar.length} APLICAR · ${juicio.rechazadas.length} rechazadas · ${juicio.humano.length} para Leo`)
@@ -764,16 +816,66 @@ Vos NO editás código.${suf}`,
       // 4. Applier (seriado en un solo worktree/branch review/*) + gate + publish
       let reviewPr = null
       if (juicio.aplicar.length > 0) {
-        const apl = await llamar(
-          (suf) => `Sos el APPLIER del review fleet. Trabajás en tu worktree AISLADO (tu cwd).
-PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA}. Instalá deps si hace falta.
-Aplicá EN ORDEN estos fixes aprobados por el juez (y SOLO estos):
-${juicio.aplicar.map((f, i) => `${i + 1}. [${f.ubicacion}] ${f.titulo} → ${f.fix}`).join('\n')}
+        // §3.7c — APPLIER POR TANDAS. Autopsia 2026-07-27 (corrida prd0019-0722): un
+        // applier único aplicando toda la lista del juez corrió 491 turnos con el contexto
+        // creciendo de 44k a 462k tokens → 115M de tokens leídos, 39% del costo de esa
+        // corrida ENTERA en un solo agente. El contexto se re-envía en cada turno, así que
+        // un agente maratónico paga cuadrático. Trocear en tandas de N fixes le da a cada
+        // una contexto fresco sobre el MISMO worktree/branch (la tanda 1 lo crea aislado,
+        // las siguientes hacen cd): mismos fixes, mismo orden, mismo gate, ~1/4 del costo.
+        const CHUNK = A.applierChunk ?? 4
+        const tandas = []
+        for (let i = 0; i < juicio.aplicar.length; i += CHUNK) tandas.push(juicio.aplicar.slice(i, i + CHUNK))
+        log(`review: ${juicio.aplicar.length} fixes → ${tandas.length} tanda(s) de hasta ${CHUNK}`)
+
+        let apl = null
+        for (const [idx, tanda] of tandas.entries()) {
+          const primera = idx === 0
+          const paso0 = primera
+            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA}. Instalá deps si hace falta.`
+            : `PASO 0: cd ${apl.worktree} — worktree YA preparado por la tanda anterior (branch ${apl.branch}, ${apl.aplicadas} fix(es) ya aplicados y commiteados). NO hagas checkout, NO resetees, NO toques los commits previos.`
+          const r = await llamar(
+            (suf) => `Sos el APPLIER del review fleet — tanda ${idx + 1} de ${tandas.length}.${primera ? ' Trabajás en tu worktree AISLADO (tu cwd).' : ''}
+${paso0}
+Aplicá EN ORDEN estos fixes aprobados por el juez (y SOLO estos — los de otras tandas NO son tuyos):
+${tanda.map((f, i) => `${i + 1}. [${f.ubicacion}] ${f.titulo} → ${f.fix}`).join('\n')}
 Por cada fix: aplicá, corré build/tests del área tocada; si rompe, REVERTILO (no "fixes forward") y anotalo en falladas.
 Al final: git add -A && git commit. NO pushees, NO gh.
-Reportá por schema: worktree (pwd absoluto), branch, aplicadas, falladas, resumen.${suf}`,
-          { label: 'review:applier', phase: 'Review', model: M[T.applier], effort: 'medium', isolation: 'worktree', schema: APPLIER_SCHEMA }
-        )
+
+DISCIPLINA DE CONTEXTO (tu contexto se re-envía entero en CADA turno: lo que arrastrás lo pagás N veces):
+  - Tests/build con el reporter más silencioso del runner (--reporter=dot, -q) y filtrá a lo accionable
+    (\`| tail -40\`, \`grep -A5 -i 'fail\\|error'\`). Nunca vuelques suites verdes ni logs de build enteros.
+  - Corré SOLO los tests del área que tocás, no la suite completa: el pipeline la mide aparte después.
+  - No releas archivos que ya leíste; editá con lo que ya tenés en contexto. Leé rangos, no archivos enteros.
+
+Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de ESTA tanda), falladas, resumen.${suf}`,
+            {
+              label: `review:applier${tandas.length > 1 ? `-t${idx + 1}` : ''}`,
+              phase: 'Review',
+              model: M[T.applier],
+              effort: E.applier,
+              ...(primera ? { isolation: 'worktree' } : {}),
+              schema: APPLIER_SCHEMA,
+            }
+          )
+          if (!r) {
+            log(`⚠ applier tanda ${idx + 1}/${tandas.length} murió — se conserva lo aplicado hasta acá`)
+            juicio.humano.push({
+              titulo: `tanda ${idx + 1} del applier no corrió`,
+              decision_necesaria: `quedaron sin aplicar: ${tanda.map((f) => f.titulo).join('; ')}`,
+            })
+            break
+          }
+          apl = primera
+            ? { ...r, falladas: r.falladas ?? [] }
+            : {
+                worktree: apl.worktree,
+                branch: apl.branch,
+                aplicadas: apl.aplicadas + (r.aplicadas ?? 0),
+                falladas: [...apl.falladas, ...(r.falladas ?? [])],
+                resumen: `${apl.resumen}\n${r.resumen ?? ''}`.trim(),
+              }
+        }
         if (apl && apl.aplicadas > 0) {
           const medRev = await medir(apl.worktree, 'Review', 'review-fixes', { conDiff: false })
           const gRev = gate(medRev, baseMetrics, { exigirTests: false })
