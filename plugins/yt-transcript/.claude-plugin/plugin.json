@@ -1,0 +1,9 @@
+{
+  "name": "yt-transcript",
+  "version": "1.0.0",
+  "description": "Transcript de videos de YouTube a un archivo central en ~/Documents/Transcripts. Cascada de vías probadas: captions oficiales via yt-dlp (json3) → fallback a Whisper local (faster-whisper large-v3) cuando el video no tiene subtítulos. Guarda texto plano, con timestamps, SRT, audio mp3 y meta.json por video; mantiene un INDEX.md central regenerado desde la metadata. El comando /yt-transcript agrega un summary.md escrito por Claude sobre el transcript ya extraído.",
+  "author": {
+    "name": "Leopoldo Bini",
+    "email": "raul.leopoldobini@gmail.com"
+  }
+}

@@ -106,6 +106,16 @@
       },
       "source": "./plugins/sandcastle-max",
       "category": "engineering"
+    },
+    {
+      "name": "yt-transcript",
+      "description": "Transcript de videos de YouTube a un archivo central (default ~/Documents/Transcripts, configurable con YT_TRANSCRIPTS_DIR). El comando /yt-transcript corre scripts/ytt.sh y después escribe un summary.md en español con timestamps anclados. Cascada de dos vías: (1) captions oficiales/automáticas vía yt-dlp en formato json3 —la que funciona—, y (2) fallback a Whisper local (faster-whisper large-v3, env mamba video-to-knowledge) cuando el video no tiene subtítulos; --whisper fuerza la vía 2. Por video guarda transcript.txt, transcript_timestamped.txt, transcript.srt, audio.mp3 y meta.json en una carpeta <fecha>__<canal>__<titulo>__<id>, más un INDEX.md central regenerado desde los meta.json (nunca append: borrar una carpeta a mano se refleja solo; 📝 marca las entradas con resumen). Idempotente —re-invocar un video ya extraído solo refresca el índice—, con --force para re-extraer. Robustez derivada de fallos reales medidos: yt() reintenta con --cookies-from-browser cuando YouTube responde 429 o 'Sign in to confirm you're not a bot'; se prefiere el yt-dlp de Homebrew porque trae Deno para resolver el n-challenge (el instalado por pip falla); Safari no sirve como fuente de cookies porque SIP bloquea Cookies.binarycookies. Flags: --no-audio, --force, --whisper, --lang xx, y --no-summary (del comando). Invocación explícita del usuario.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Leopoldo Bini"
+      },
+      "source": "./plugins/yt-transcript",
+      "category": "productivity"
     }
   ]
 }
