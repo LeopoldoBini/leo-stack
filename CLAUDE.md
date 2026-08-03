@@ -1,4 +1,4 @@
-# toolkit-leopoldo
+# leo-stack
 
 Marketplace de plugins de Claude Code (host-orchestrator, memory-flow, shared-language, yt-transcript…). Los plugins viven en `plugins/<plugin>/`; el índice con versiones pinneadas es `.claude-plugin/marketplace.json`.
 
@@ -6,7 +6,7 @@ Marketplace de plugins de Claude Code (host-orchestrator, memory-flow, shared-la
 
 ### Issue tracker
 
-Issues en GitHub Issues del repo (`LeopoldoBini/toolkit-leopoldo`), operadas con el CLI `gh`. See `docs/agents/issue-tracker.md`.
+Issues en GitHub Issues del repo (`LeopoldoBini/leo-stack`), operadas con el CLI `gh`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

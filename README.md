@@ -1,4 +1,4 @@
-# toolkit-leopoldo
+# leo-stack
 
 A curated, opinionated engineering toolkit for Claude Code. Three plugins: the full engineering workflow (alignment → PRD → vertical-slice issues → AFK handoff → TDD execution → architectural sanity → triage), plus standalone alignment and response-mode tools.
 
@@ -13,8 +13,8 @@ A curated, opinionated engineering toolkit for Claude Code. Three plugins: the f
 ## Install
 
 ```bash
-/plugin marketplace add LeopoldoBini/toolkit-leopoldo
-/plugin install engineering-workflow@toolkit-leopoldo
+/plugin marketplace add LeopoldoBini/leo-stack
+/plugin install engineering-workflow@leo-stack
 ```
 
 Then, in each repo where you want the pipeline visible to future sessions, run once:
@@ -44,10 +44,10 @@ In v1, the workflow was split across three plugins (`engineering-discipline`, `s
 If you had v1 installed, replace it:
 
 ```
-/plugin uninstall engineering-discipline@toolkit-leopoldo
-/plugin uninstall shared-language@toolkit-leopoldo
-/plugin uninstall backlog-flow@toolkit-leopoldo
-/plugin install   engineering-workflow@toolkit-leopoldo
+/plugin uninstall engineering-discipline@leo-stack
+/plugin uninstall shared-language@leo-stack
+/plugin uninstall backlog-flow@leo-stack
+/plugin install   engineering-workflow@leo-stack
 ```
 
 All slash commands keep the same names (`/grill-with-docs`, `/to-prd`, `/diagnose`, etc.) — only the plugin packaging changed.

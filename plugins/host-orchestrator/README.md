@@ -33,7 +33,7 @@ To migrate your local install:
 
 ```bash
 claude plugin uninstall merge-orchestrator
-claude plugin install host-orchestrator@toolkit-leopoldo --scope project
+claude plugin install host-orchestrator@leo-stack --scope project
 # Repeat in each project where you used merge-orchestrator
 ```
 
@@ -266,7 +266,7 @@ No `skills/`. No auto-invocation by phrase. The slash commands are the only entr
 
 ---
 
-## Composition with the rest of `toolkit-leopoldo`
+## Composition with the rest of `leo-stack`
 
 ```
 engineering-workflow:

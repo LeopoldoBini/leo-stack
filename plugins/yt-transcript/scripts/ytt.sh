@@ -69,7 +69,7 @@ for date, m, name in rows:
         f"| {hms(m.get('duration_seconds'))} | {m.get('words',0)} | {m.get('method','')} "
         f"| [`{name}`](./{name.replace(' ', '%20')}/) |")
 out += ["", "---", "_📝 = con resumen. Generado por `/yt-transcript` "
-        "(plugin yt-transcript, marketplace toolkit-leopoldo)._"]
+        "(plugin yt-transcript, marketplace leo-stack)._"]
 open(os.path.join(root, "INDEX.md"), "w").write("\n".join(out) + "\n")
 print(f"  INDEX.md: {len(rows)} entradas")
 PY
