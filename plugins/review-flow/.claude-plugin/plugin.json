@@ -1,7 +1,7 @@
 {
   "name": "review-flow",
-  "version": "1.0.0",
-  "description": "Checkpoints pre y post ejecución: /analizar verifica comprensión antes de ejecutar (ideal para dictados por voz o instrucciones ambiguas); /revisar_trabajo aplica revisión crítica post-implementación. Incluye agent revisor_de_trabajo para análisis exhaustivos sin modificar código.",
+  "version": "2.0.0",
+  "description": "Checkpoint pre-ejecución: /analizar verifica la comprensión antes de tocar nada, pensado para dictados por voz e instrucciones ambiguas donde una confusión fonética ES/EN cambia el trabajo.",
   "author": {
     "name": "Leopoldo Bini",
     "email": "raul.leopoldobini@gmail.com"

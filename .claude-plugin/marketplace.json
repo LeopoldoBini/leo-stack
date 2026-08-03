@@ -1,52 +1,12 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "leo-stack",
-  "description": "Curated engineering toolkit: opinionated stack of plugins for the full development pipeline (alignment → PRD → vertical-slice issues → AFK handoff → TDD execution → architectural sanity → triage), plus standalone alignment and response-mode tools. Adapted in part from mattpocock/skills (MIT).",
+  "description": "Stack opinado sobre la suite de mattpocock/skills: solo lo que tiene sentido junto con el pipeline AFK, más la obra original que no tiene equivalente upstream. Núcleo: host-orchestrator, motor de pipeline PRD host-nativo. Adaptado en parte de mattpocock/skills (MIT).",
   "owner": {
     "name": "Leopoldo Bini",
     "email": "raul.leopoldobini@gmail.com"
   },
   "plugins": [
-    {
-      "name": "engineering-workflow",
-      "description": "Unified engineering workflow (12 skills + /init-workflow command). The full pipeline: /grill-with-docs and /context-bootstrap (alignment + shared language), /to-prd, /to-issues, /agent-brief, /triage (backlog flow), /tdd-vertical, /diagnose, /zoom-out, /deep-modules (disciplined coding), /prototype (throwaway design exploration), /review-fleet (multi-agent review: parallel reviewers per module → judge rules APLICAR/RECHAZAR/HUMANO; report-only by default, --apply runs appliers on best model). Run /init-workflow once per repo to seed the pipeline order in CLAUDE.md. v2.4.0: adopts upstream `prototype` skill (mattpocock/skills) verbatim — routes between a terminal TUI for state/logic prototypes and N radically different UI variants on one route for visual prototypes. v2.3.0: /to-issues generates the agent brief inline for every AFK slice; /agent-brief gains Reality-anchored principle.",
-      "version": "2.9.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/engineering-workflow",
-      "category": "engineering"
-    },
-    {
-      "name": "handoff",
-      "description": "Compact the current conversation into a handoff document for another agent to pick up. Saves a summary to the OS temp directory with a 'suggested skills' section, references existing artifacts (PRDs, plans, ADRs, issues, diffs) instead of duplicating them, and redacts secrets. Standalone — sibling of grill-me. Adopted verbatim from mattpocock/skills (MIT).",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/handoff",
-      "category": "productivity"
-    },
-    {
-      "name": "caveman",
-      "description": "Ultra-compressed response mode as a SKILL (not output-style). Cuts ~75% tokens by dropping articles/filler/pleasantries while keeping full technical accuracy. Persists after trigger until user revokes. Auto-clarity exception for security warnings and destructive ops. Adopted verbatim from mattpocock/skills (MIT). Coexists with response-modes' caveman output-style — pick whichever activation model fits.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/caveman",
-      "category": "productivity"
-    },
-    {
-      "name": "grill-me",
-      "description": "Stress-test plans through relentless interviewing — walks the decision tree branch by branch, one question at a time, exploring the codebase when answers live there. Triggers: 'grill me', 'pressure test', 'poke holes', 'play devil's advocate', 'validar plan', 'discutir antes de implementar'. Standalone — useful for non-code planning sessions where engineering-workflow is overkill.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/grill-me",
-      "category": "alignment"
-    },
     {
       "name": "interface-lens",
       "description": "Juzgar, diseñar y construir interfaces con psicología UX + brújula ética (eje ético → persuasivo → oscuro, prueba del arrepentimiento de Nir Eyal, norte time-well-spent). Base de conocimiento: 28 principios en 6 familias (disparadores, acción/fricción, recompensa, inversión, claridad, ética) organizados como bucle disparador→acción→recompensa→inversión, más taxonomía operativa de dark patterns con señales de código por patrón. Tres skills de invocación explícita: /ui-judge audita screenshot/URL/código con hallazgos anclados a evidencia concreta (elemento/cita/archivo:línea — nunca heurísticas genéricas), score por familia con veto ético, y sección obligatoria de límites del input; /ux-design propone flujos declarando qué principio usa cada decisión y por qué sirve al usuario, con guardas éticas y salida simétrica a la entrada; /dark-pattern-scan escanea flujos completos pre-ship (suscripción, checkout, consentimiento) midiendo asimetría de fricción entrada/salida, con reporte pasa/falla, banderas regulatorias (FTC click-to-cancel, DSA) e integración opcional con /code-review. Complementa (no solapa) skills de diseño visual tipo ui-ux-pro-max: esto cubre cómo se comporta la interfaz y su ética, no cómo se ve.",
@@ -69,22 +29,12 @@
     },
     {
       "name": "review-flow",
-      "description": "Checkpoints pre y post ejecución: /analizar verifica comprensión antes de ejecutar (ideal para dictados por voz o instrucciones ambiguas); /revisar_trabajo aplica revisión crítica post-implementación. Incluye agent revisor_de_trabajo para análisis exhaustivos sin modificar código.",
-      "version": "1.0.0",
+      "description": "Checkpoint pre-ejecución: /analizar verifica la comprensión antes de tocar nada, pensado para dictados por voz e instrucciones ambiguas donde una confusión fonética ES/EN cambia el trabajo.",
+      "version": "2.0.0",
       "author": {
         "name": "Leopoldo Bini"
       },
       "source": "./plugins/review-flow",
-      "category": "productivity"
-    },
-    {
-      "name": "response-modes",
-      "description": "Optional output styles for response tone/format. Caveman: ultra-terse, drops filler. No-TLDR: overrides the always-on TL;DR rule for fluid chat. Toggle via /output-style or settings.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/response-modes",
       "category": "productivity"
     },
     {

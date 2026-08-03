@@ -1,63 +1,46 @@
 # leo-stack
 
-A curated, opinionated engineering toolkit for Claude Code. Three plugins: the full engineering workflow (alignment → PRD → vertical-slice issues → AFK handoff → TDD execution → architectural sanity → triage), plus standalone alignment and response-mode tools.
+Marketplace de plugins de Claude Code: **el stack opinado**, lo que solo tiene sentido junto con el pipeline AFK. Lo que se agarra suelto vive en [`leo-tools`](https://github.com/LeopoldoBini/leo-tools); lo de dominio laboral, en `leo-private`.
+
+El criterio de admisión es el eje de interdependencia: un plugin entra acá si no se explica solo. Lo que la [suite de Matt Pocock](https://github.com/mattpocock/skills) ya cubre no se re-forkea — se consume desde el plugin oficial `mattpocock-skills`, y este marketplace queda como overlay fino encima.
 
 ## Plugins
 
-| Plugin | What it gives you |
+| Plugin | Qué hace |
 |---|---|
-| **engineering-workflow** | The full pipeline: `/grill-with-docs`, `/context-bootstrap`, `/to-prd`, `/to-issues`, `/agent-brief`, `/triage`, `/tdd-vertical`, `/diagnose`, `/zoom-out`, `/deep-modules`. Plus `/init-workflow` to seed the canonical order into the repo's `CLAUDE.md`. |
-| **grill-me** | Stress-test a plan branch by branch before writing code. Standalone — useful for non-code planning sessions. |
-| **response-modes** | Optional output styles: caveman (terse) and no-tldr (override always-on TL;DR rule). |
+| **host-orchestrator** | El motor del pipeline AFK: `/prd-pipeline` orquesta el despacho de waves, la review fleet y el merge sobre el host, como Workflow determinista. Núcleo del stack. |
+| **interface-lens** | Juzgar, diseñar y construir interfaces con psicología UX y brújula ética. |
+| **memory-flow** | `/revisar_memoria`: barrido batch de la memoria por-archivo, con propuestas de graduación a `CLAUDE.md` / `CONTEXT.md`. |
+| **review-flow** | `/analizar`: checkpoint pre-ejecución para dictados por voz e instrucciones ambiguas. |
+| **yt-transcript** | Transcripción de videos de YouTube a un archivo central, con resumen en español y timestamps anclados. |
 
-## Install
+## Instalación
 
 ```bash
 /plugin marketplace add LeopoldoBini/leo-stack
-/plugin install engineering-workflow@leo-stack
+/plugin install host-orchestrator@leo-stack
 ```
 
-Then, in each repo where you want the pipeline visible to future sessions, run once:
+Los plugins se instalan por proyecto. Si la UI bloquea una reinstalación cross-project ([bug #14202](https://github.com/anthropics/claude-code/issues/14202)):
 
-```
-/init-workflow
-```
-
-This seeds (or refreshes, idempotently) a `## Pipeline de trabajo (engineering-workflow)` block into the repo's `CLAUDE.md`, between HTML markers, so any future Claude session sees the canonical order.
-
-## The pipeline
-
-1. **`/context-bootstrap`** — only if the repo has code but no `CONTEXT.md`. One-shot.
-2. **`/grill-with-docs`** (or `/grill-me` for non-code) — alignment session.
-3. **`/to-prd`** — synthesise a PRD from the conversation.
-4. **`/to-issues`** — break the PRD into vertical slices.
-5. **Implementation — pick a mode per issue**:
-   - **Interactive session** (you at the keyboard with Claude): straight to `/tdd-vertical` + `/diagnose`.
-   - **AFK / remote agent handoff**: `/agent-brief <issue>` (durable contract — acceptance criteria, out-of-scope, no fragile paths) + `/schedule` (when it fires). The AFK agent runs `/tdd-vertical` against the brief, unattended.
-6. **`/zoom-out`** + **`/deep-modules`** — every 3-5 closed issues, architectural sanity check.
-7. **`/triage`** — when the backlog grows.
-
-## Migration v1 → v2 (BREAKING)
-
-In v1, the workflow was split across three plugins (`engineering-discipline`, `shared-language`, `backlog-flow`). v2 unifies them into a single `engineering-workflow` plugin because the skills are not independently useful — they form one indivisible pipeline.
-
-If you had v1 installed, replace it:
-
-```
-/plugin uninstall engineering-discipline@leo-stack
-/plugin uninstall shared-language@leo-stack
-/plugin uninstall backlog-flow@leo-stack
-/plugin install   engineering-workflow@leo-stack
+```bash
+claude plugin install <plugin>@leo-stack --scope project
 ```
 
-All slash commands keep the same names (`/grill-with-docs`, `/to-prd`, `/diagnose`, etc.) — only the plugin packaging changed.
+## Reconstrucción en curso
 
-`grill-me` and `response-modes` are unchanged.
+El marketplace está siendo reconstruido como overlay fino: seis plugins ya se retiraron y cuatro piezas se mudan a `leo-tools`. El recorrido completo — qué queda, qué muere, con qué se reemplaza y en qué orden — vive en el mapa [leo-stack como overlay fino sobre mattpocock-skills](https://github.com/LeopoldoBini/leo-stack/issues/1).
 
-## Attribution
+Lo retirado no desaparece sin rastro: [`DEFUNCIONES.md`](DEFUNCIONES.md) registra cada muerte con su reemplazo nombrado y el censo de repos que la tenían instalada. Y el tag `rescate/pre-reconstruccion` marca el último punto del historial donde todo vive entero:
 
-Several skills (`grill-me`, `grill-with-docs`, `diagnose`, `deep-modules`, `tdd-vertical`, `zoom-out`, `to-prd`, `to-issues`, `triage`, `agent-brief`, `caveman` output style) are adapted from [mattpocock/skills](https://github.com/mattpocock/skills) (MIT). See `LICENSE` for full attribution. Modifications include bilingual triggers, output-style packaging, the `/init-workflow` seeding command, and integration with the `CONTEXT.md` / `MEMORY.md` / `CLAUDE.md` three-artifact convention.
+```bash
+git show rescate/pre-reconstruccion:plugins/<plugin>/<archivo>
+```
 
-## License
+## Atribución
 
-MIT — see `LICENSE`.
+Partes de este trabajo derivan de [mattpocock/skills](https://github.com/mattpocock/skills) (MIT, Copyright © Matt Pocock). Ver `LICENSE`.
+
+## Licencia
+
+MIT — ver `LICENSE`.
