@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "toolkit-leopoldo",
+  "name": "leo-stack",
   "description": "Curated engineering toolkit: opinionated stack of plugins for the full development pipeline (alignment → PRD → vertical-slice issues → AFK handoff → TDD execution → architectural sanity → triage), plus standalone alignment and response-mode tools. Adapted in part from mattpocock/skills (MIT).",
   "owner": {
     "name": "Leopoldo Bini",
