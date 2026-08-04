@@ -31,6 +31,7 @@ grilling
 prototype
 research
 code-review
+implement
 # Claude Code, built-in
 workflows
 plugin

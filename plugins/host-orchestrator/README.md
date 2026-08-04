@@ -21,6 +21,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
 | Qué se siembra al adoptar el plugin en un repo | `commands/init.md` |
 | Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md` |
+| El lado de lectura, corrible a mano antes de lanzar | `scripts/pipeline-read.sh` — spec §3.13b |
 | Contrato por repo (opcional, con defaults) | `.host-orchestrator/config.json` — spec §3.10 |
 | Historial de versiones | `docs/CHANGELOG.md` |
 
@@ -38,10 +39,16 @@ host-orchestrator/
 ├── commands/
 │   ├── prd-pipeline.md                    # /prd-pipeline — lanza el motor
 │   └── init.md                            # /init — onboarding del repo
+├── scripts/
+│   ├── pipeline-read.sh                   # scope · check · intent (solo lectura)
+│   ├── test-pipeline-read.sh              # su test, contra fixtures/
+│   └── fixtures/                           # salida de gh ya filtrada, un caso por directorio
 └── agents/
     ├── parallel-implementer.md            # TDD vertical slice; nunca pushea
     └── merge-resolver.md                  # 5 criterios de no-regresión; recomienda
 ```
+
+Antes de lanzar, el scope se puede mirar como lo va a ver el motor —misma tabla de bucketing, sin gastar un token—: `sh scripts/pipeline-read.sh scope milestone:PRD-0016 --rama prd/prd-0016`.
 
 Los comandos standalone `/parallel-implement-wave` y `/merge-orchestrate` se retiraron en 4.2.0 — ver `DEFUNCIONES.md` del marketplace y el tag `rescate/comandos-standalone`. <!-- acta -->
 

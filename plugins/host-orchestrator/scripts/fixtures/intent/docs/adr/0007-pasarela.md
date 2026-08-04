@@ -1,0 +1,3 @@
+# ADR-0007: puerto de pasarela de pago
+
+Contexto...

@@ -33,6 +33,9 @@ export const meta = {
 //   models: { T0, T1, T2, T3 },           // model_map del config
 //   tiers: { scout, validator, implementer, serializer, resolver, reviewer, judge, applier },
 //   issueTiers: { '<n>': 'T2', ... },     // override por issue (opcional)
+//   readCli: path absoluto de scripts/pipeline-read.sh (lo resuelve el comando
+//                                         desde ${CLAUDE_PLUGIN_ROOT}),
+//   scopeInicial: <salida de `pipeline-read.sh scope` del pre-fetch de T0> | null,
 //   validateHook: 'scripts/wave-validate.sh' | null,
 //   testGlobs: ['**/*.test.*', ...],
 //   denyPaths: [],                        // ratchets/guards ortogonales (§3.10)
@@ -99,12 +102,20 @@ const AUDIT_LOG = `${REPO}/.host-orchestrator/waves/${A.runLabel}.log`
 const BUDGET_TOTAL = A.budgetTotal ?? budget.total
 const restante = () => (BUDGET_TOTAL ? Math.max(0, BUDGET_TOTAL - budget.spent()) : Infinity)
 
-const scopeQuery = {
-  milestone: `--milestone "${A.scope.value}"`,
-  label: `--label "${A.scope.value}"`,
-  parent: `--search "Part of #${String(A.scope.value).replace('#', '')} in:body"`,
-  list: null, // lista explícita: el scout la recibe literal
-}[A.scope.type]
+// §3.4b — el scope viaja literal al CLI de lectura, que es el único lugar donde
+// vive la tabla de bucketing. Acá no se traduce a flags de gh: dos traducciones
+// del mismo scope divergen sin que nadie se entere.
+const SCOPE_ARG = A.scope.type === 'list' ? A.scope.value : `${A.scope.type}:${A.scope.value}`
+
+// Sin el CLI no hay bucketing, y un `sh undefined` daría issues vacío que el
+// motor leería como "nada accionable" — un scope entero salteado en silencio.
+const READ_CLI = A.readCli
+if (!READ_CLI) {
+  throw new Error(
+    `prd-pipeline: falta args.readCli. El comando debe resolver \${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh ` +
+      `a path absoluto y pasarlo en args (paso 2 de commands/prd-pipeline.md): el script del Workflow no ve esa variable.`
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Schemas — los agentes reportan HECHOS y NÚMEROS; los veredictos son del script
@@ -124,15 +135,17 @@ const SCOUT_SCHEMA = {
           title: { type: 'string' },
           bucket: {
             type: 'string',
-            enum: ['DONE', 'MERGE_READY', 'IN_REVIEW', 'IMPLEMENTABLE', 'BLOCKED_BY_DEP', 'HUMAN_GATED'],
+            enum: ['DONE', 'SPEC', 'MERGE_READY', 'IN_REVIEW', 'IMPLEMENTABLE', 'BLOCKED_BY_DEP', 'HUMAN_GATED'],
           },
           pr_number: { type: 'integer' },
           pr_branch: { type: 'string' },
           blocked_by: { type: 'array', items: { type: 'integer' } },
+          parent: { type: 'integer', description: 'issue del spec padre, por grafo nativo' },
           detalle: { type: 'string' },
         },
       },
     },
+    specs: { type: 'array', items: { type: 'integer' }, description: 'issues padre del scope: la intención contra la que se revisa' },
     notas: { type: 'string' },
   },
 }
@@ -160,7 +173,12 @@ const IMPL_SCHEMA = {
     branch: { type: 'string' },
     resumen: { type: 'string' },
     bugs_reales: { type: 'array', items: { type: 'string' } },
-    bloqueado: { type: 'string', description: 'solo si el brief es inimplementable: por qué' },
+    recursos_verificados: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'anclaje a evidencia real: un recurso vivo por línea, con CÓMO se verificó y CUÁNDO',
+    },
+    bloqueado: { type: 'string', description: 'solo si el ticket es inimplementable: por qué' },
   },
 }
 
@@ -420,6 +438,7 @@ const bugsReales = []
 const bloqueadas = []
 const pendientes = []
 const cerradas = [] // issues con PR publicado a la integradora → van al `Closes #` del PR final (autocierre al mergear a la default branch)
+const specsDelScope = new Set() // issues padre (spec) que el scope atraviesa: la intención contra la que revisa el eje Spec
 let inReviewUltimo = [] // PRs rojos/no-mergeables: NO accionables por el motor, van a para_leo
 let allDone = false
 let baseMetrics = null
@@ -433,34 +452,31 @@ for (let wave = 1; wave <= A.maxWaves; wave++) {
   const FASE = `Wave ${wave}`
   phase(FASE)
 
-  // --- Scout (frescura garantizada: el prompt varía por wave) ----------------
-  const scout = await llamar(
-    (suf) => `Sos un SCOUT de estado (wave ${wave}, corrida ${A.runLabel}). Solo LEÉS GitHub con gh; no mutás nada, no opinás sobre código.
+  // --- Scout: TRANSPORTE, no juicio (§3.4b) ---------------------------------
+  // El bucketing lo computa pipeline-read.sh sobre el grafo nativo de GitHub;
+  // acá solo hace falta un turno con shell, porque el script del Workflow no
+  // tiene ninguna. La wave 1 ni eso: reusa el pre-fetch que T0 ya hizo en las
+  // precondiciones. La frescura por wave se mantiene — el estado cambia entre
+  // waves y por eso las siguientes vuelven a correr el comando.
+  let scout
+  if (wave === 1 && A.scopeInicial) {
+    scout = A.scopeInicial
+    log(`scout w1: pre-fetch de T0 (sin agente)`)
+  } else {
+    scout = await llamar(
+      (suf) => `Sos un TRANSPORTE (wave ${wave}, corrida ${A.runLabel}), no un analista. Corré EXACTAMENTE este comando y devolvé su salida por el output estructurado, tal cual:
 
-1. cd ${REPO}
-2. Issues del scope: ${
-      A.scope.type === 'list'
-        ? `gh issue view por cada una de: ${A.scope.value}`
-        : `gh issue list ${scopeQuery} --state all --json number,title,state,labels,body --limit 200`
-    }
-3. Por cada issue, bucketeá con estas reglas EXACTAS (primera que matchee):
-   - DONE: existe PR MERGEADO hacia ${RAMA} que referencia la issue. OJO: la issue puede seguir ABIERTA — las issues se cierran recién cuando el PR final llega a ${BASE}; el PR mergeado ES la identidad del trabajo hecho. (También DONE si la issue está cerrada con PR mergeado.)
-   - HUMAN_GATED: label 'agent-blocked' (o variantes 'agent-blocked-*').
-   - MERGE_READY: PR abierto hacia ${RAMA} con label '${A.labels.agentPr}', sin label 'merge-blocked'.
-   - IN_REVIEW: PR abierto pero con checks fallidos, conflictos o 'merge-blocked'.
-   - BLOCKED_BY_DEP: el body tiene 'Blocked by #X' con X no DONE (listá los números en blocked_by).
-   - IMPLEMENTABLE: sin PR abierto ni mergeado, label '${A.labels.ready}' (o 'state/${A.labels.ready}'), deps cerradas.
-   - NINGUNA regla matchea (ej. sin label ready, sin PR) → HUMAN_GATED con detalle 'sin regla aplicable: <por qué>'.
-   Buscá PRs con: gh pr list --state all --search "<n> in:title" --json number,state,headRefName,labels,mergeable,statusCheckRollup (y validá que referencie la issue; incluí los MERGED).
-4. all_done = ¿todas DONE o HUMAN_GATED sin nada accionable? → all_done=true SOLO si no queda NADA accionable (ni MERGE_READY ni IMPLEMENTABLE ni IN_REVIEW) y hay al menos una DONE.
+cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}
 
-Reportá por schema. En 'detalle' de cada issue: 1 línea con la evidencia del bucket.${suf}`,
-    { label: `scout:w${wave}`, phase: FASE, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
-  )
+El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
+      { label: `scout:w${wave}`, phase: FASE, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
+    )
+  }
   if (!scout) {
     log(`✖ scout de la wave ${wave} murió — ABORT`)
     return { status: 'ABORT', fase: FASE, detalle: 'scout murió', waves: wavesReporte }
   }
+  for (const s of scout.specs ?? []) specsDelScope.add(s)
   const buckets = {}
   for (const i of scout.issues) (buckets[i.bucket] ??= []).push(i)
   log(
@@ -567,7 +583,11 @@ En detalle reportá el path del worktree.`,
 Worktree: ${wtPr} (branch ${iss.pr_branch}). Tarea: mergear origin/${RAMA} en la branch del PR #${prNum} — corré el merge y resolvé conflictos EN LOS ARCHIVOS, commiteados localmente.
 
 ## Intent packet
-Issue #${iss.number}: ${iss.title}. Leé el brief con: gh issue view ${iss.number} --comments (sección '## Agent Brief') y el PR con: gh pr view ${prNum}. Aplicá tus 5 criterios de no-regresión.
+Issue #${iss.number}: ${iss.title}. El contrato ES el body del ticket: gh issue view ${iss.number} — y el PR: gh pr view ${prNum}.
+Si el diff parece exceder lo que el ticket pide, subí un peldaño de la escalera de intención antes de decidir:
+  sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
+te devuelve el '## Out of Scope' y el '## Testing Decisions' del spec padre — la evidencia que tus criterios 1 y 4 necesitan.
+Aplicá tus 5 criterios de no-regresión.
 
 ## Conflicto reportado
 ${prep?.detalle ?? 'sin detalle'}`,
@@ -639,7 +659,11 @@ ${prep?.detalle ?? 'sin detalle'}`,
       const pub = await serializar(
         `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 3.
-2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
+2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, ${
+        (r.impl.recursos_verificados ?? []).length
+          ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
+          : ''
+      }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
 3. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree canónico del merge posterior. Solo conservalo si el push o el PR fallaron.`,
         `publish-i${r.issue}`,
         FASE
@@ -666,12 +690,15 @@ async function implementarConGate(iss, FASE, deny) {
 PASO 0 (obligatorio — la base se toma del REMOTO, §3.11):
   git fetch origin && git checkout -B issue-${iss.number} origin/${RAMA}
   Instalá dependencias si el repo lo necesita.
-PASO 1: leé el brief: gh issue view ${iss.number} --comments → sección '## Agent Brief' (gh solo LECTURA: prohibida toda mutación remota).
-PASO 2: implementá el slice vertical con tu disciplina TDD completa (roja→verde por criterio de aceptación).${deny}
-PASO 3: verificate: typecheck + suite de tests del repo. Ningún test antes-verde puede quedar rojo.
-PASO 4: git add -A && git commit (mensaje descriptivo). NO pushees, NO gh pr create — el pipeline publica por vos.
+PASO 1: leé el contrato — es el BODY del ticket: gh issue view ${iss.number} (gh solo LECTURA: prohibida toda mutación remota).
+PASO 2: subí la escalera de intención: sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
+  Te devuelve, del spec padre, el '## Out of Scope' (lo que NO tenés que construir) y el '## Testing Decisions' con los SEAMS pre-acordados —testeá ahí y no donde te resulte cómodo—, más el índice de ADRs y la rama del prototipo si hay. Abrí solo lo que tu slice consume.
+PASO 3: implementá el slice vertical con tu disciplina TDD completa (roja→verde por criterio de aceptación).${deny}
+PASO 4: verificate: typecheck + suite de tests del repo. Ningún test antes-verde puede quedar rojo.
+PASO 5: git add -A && git commit (mensaje descriptivo). NO pushees, NO gh pr create — el pipeline publica por vos.
 Si un error destapa un BUG REAL preexistente: NO lo arregles, anotalo en bugs_reales.
-Si el brief es inimplementable/ambiguo: explicalo en 'bloqueado' y NO inventes.
+Si el ticket es inimplementable/ambiguo: explicalo en 'bloqueado' y NO inventes.
+Todo recurso vivo que tu slice nombre (tabla, endpoint, topic, variable de entorno) va verificado contra el recurso REAL desde este worktree, y cada verificación se reporta en 'recursos_verificados' con CÓMO la hiciste y CUÁNDO. Si no llegás al recurso: 'bloqueado' con RESOURCE_UNREACHABLE, no un mock que finge.
 
 DISCIPLINA DE CONTEXTO (no es cosmético: tu contexto se re-envía entero en CADA turno, así que
 lo que arrastrás lo pagás N veces — medido 2026-07-27: un implementer de 269 turnos costó 79M de
@@ -696,7 +723,7 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
     }
   )
   if (!impl) return { issue: iss.number, gate: 'ERROR', motivos: ['implementer murió'] }
-  if (impl.bloqueado) return { issue: iss.number, gate: 'FAIL', motivos: [`brief: ${impl.bloqueado}`], impl }
+  if (impl.bloqueado) return { issue: iss.number, gate: 'FAIL', motivos: [`ticket: ${impl.bloqueado}`], impl }
 
   let med = await medir(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
   let g = gate(med, baseMetrics)
@@ -759,15 +786,32 @@ Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}
       const trabajos = unidades.flatMap((u) =>
         lentes.map((l) => ({
           etiqueta: `${l.key}:${u.nombre}`,
-          paths: u.paths,
+          alcance: `git diff origin/${BASE}...HEAD -- ${pathspec(u.paths)}
+   NO corras el git diff completo del repo: otros reviewers cubren el resto en paralelo.`,
           prompt: `Unidad "${u.nombre}" (paths: ${u.paths.join(', ')}; seams: ${u.seams ?? 'n/a'}). Lente ${l.desc}`,
         }))
       )
       if (unidades.length > 1)
         trabajos.push({
           etiqueta: 'integracion',
-          paths: [...new Set(unidades.flatMap((u) => u.paths ?? []))],
+          alcance: `git diff origin/${BASE}...HEAD -- ${pathspec([...new Set(unidades.flatMap((u) => u.paths ?? []))])}`,
           prompt: `SOLO los SEAMS ENTRE unidades (contratos, flujo de datos, invariantes cruzadas) que surgen de este análisis integral: ${part.analisis}. Los reviewers por unidad no ven esto; acá es donde se rompen las implementaciones multi-wave.`,
+        })
+
+      // §3.7d — EJE SPEC: +1 reviewer, no +6. El scope creep es una pregunta de
+      // TODO el diff contra TODO el spec: fragmentarlo por unidad le da a cada
+      // reviewer un pedazo de cada uno, que es la receta del falso positivo
+      // ("esto no lo pidió nadie" cuando sí, en la sección que no le tocó). Por
+      // eso este es el único reviewer que ve el diff integrado completo.
+      const specs = [...specsDelScope]
+      if (specs.length > 0)
+        trabajos.push({
+          etiqueta: 'spec',
+          alcance: `git diff origin/${BASE}...HEAD`,
+          prompt: `EJE SPEC — ¿el diff hace lo que el spec pidió, y SOLO eso?
+Leé primero la intención, entera: ${specs.map((s) => `gh issue view ${s}`).join(' && ')} (spec padre del scope; su '## Out of Scope' es la frontera explícita).
+Buscá las dos direcciones: (a) requisitos del spec que el diff NO cumple o cumple a medias; (b) SCOPE CREEP — comportamiento, dependencia o superficie pública que el diff agrega y que ningún ticket ni el spec pidieron.
+No revises arquitectura ni bugs: otros reviewers cubren eso y duplicarlos ensucia el juicio.`,
         })
 
       const hallazgosCrudos = (
@@ -776,9 +820,8 @@ Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}
             llamar(
               (suf) => `Sos un REVIEWER read-only del diff integrado ${BASE}...${RAMA}.
 1. cd ${WT_INTEGRACION} (NO modifiques NADA)
-2. Base del review — SOLO tu alcance, ya pre-filtrado:
-   git diff origin/${BASE}...HEAD -- ${pathspec(t.paths)}
-   NO corras el git diff completo del repo: otros reviewers cubren el resto en paralelo.
+2. Base del review — SOLO tu alcance:
+   ${t.alcance}
    Leé CONTEXT.md/ADRs si existen, y abrí archivos fuera de tu alcance SOLO si necesitás
    entender un contrato que tu diff consume (rangos, no archivos enteros).
 3. Tu alcance y lente: ${t.prompt}
@@ -788,9 +831,12 @@ Reportá findings ESTRUCTURADOS (título · file:line · severidad alta/media/ba
           )
         )
       )
-        .filter(Boolean)
-        .flatMap((r, idx) => (r.findings ?? []).map((f) => ({ ...f, lente: trabajos[idx]?.etiqueta })))
-      log(`review: ${hallazgosCrudos.length} findings crudos de ${trabajos.length} reviewers`)
+        // La lente se pega ANTES de filtrar: con `.filter(Boolean)` primero, un
+        // reviewer muerto corre los índices y todos los findings siguientes
+        // quedan etiquetados con la lente equivocada — y el ruteo a HUMANO del
+        // eje Spec depende de esa etiqueta.
+        .flatMap((r, idx) => (r?.findings ?? []).map((f) => ({ ...f, lente: trabajos[idx].etiqueta })))
+      log(`review: ${hallazgosCrudos.length} findings crudos de ${trabajos.length} reviewers${specs.length ? ` (eje spec sobre #${specs.join(', #')})` : ''}`)
 
       // 3. Judge (dedup + APLICAR/RECHAZAR/HUMANO + orden) — barrier necesario
       let juicio = { aplicar: [], rechazadas: [], humano: [] }
@@ -806,6 +852,7 @@ Tu deber:
 - Deduplicá solapados entre lentes.
 - Fallá cada uno: APLICAR / RECHAZAR / HUMANO (necesita decisión de Leo), razón de 1 línea.
 - Pesá: ¿es real (no especulativo)? ¿está en scope? ¿el riesgo del fix supera su beneficio? ¿contradice un ADR o CONTEXT.md?
+- REGLA DURA — los findings de scope creep de la lente 'spec' (código que ningún ticket ni el spec pidieron) van a HUMANO, nunca a APLICAR: "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los del eje spec que señalan un requisito INCUMPLIDO sí pueden ir a APLICAR.
 - Ordená la lista APLICAR: independientes primero, dependientes al final.
 Vos NO editás código.${suf}`,
             { label: 'review:judge', phase: 'Review', model: M[T.judge], effort: E.judge, schema: JUICIO_SCHEMA }

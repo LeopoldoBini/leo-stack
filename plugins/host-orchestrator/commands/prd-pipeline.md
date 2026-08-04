@@ -23,14 +23,18 @@ Compone `args` y lanza **`Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflow
 ### 1 — Pre-flight
 
 ```bash
-git rev-parse --git-dir && gh auth status
+git rev-parse --git-dir
 git remote show origin | sed -n 's/.*HEAD branch: //p'   # default branch (fallback de base)
 cat .host-orchestrator/config.json 2>/dev/null            # contrato del repo (§3.10, opcional)
 ls scripts/wave-validate.sh 2>/dev/null
 date -Iseconds                                            # ts para args (el script no puede llamar Date.now)
+
+sh "${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh" check '<scope>'
 ```
 
-Fallos de precondición → reportar BLOCKED y frenar (no lanzar nada).
+El `check` es el gate de entrada: verifica `gh auth`, que el scope resuelva, que los labels existan y que ninguna issue declare `Blocked by #N` en prosa sin edge nativo en el grafo — el motor lee el grafo y no tiene fallback textual, así que esa dependencia invisible despacharía trabajo bloqueado. Cuando falla, imprime los `gh api …/dependencies/blocked_by` exactos que lo arreglan.
+
+Sale distinto de 0 → reportar BLOCKED con su salida y frenar. **No lanzar nada**: todavía no se creó ninguna rama.
 
 ### 2 — Componer `args`
 
@@ -45,10 +49,18 @@ Defaults del config (todos opcionales): `base_branch` (default: default branch d
 - **`applierChunk`** (opcional, default 4): fixes por tanda del applier del review fleet. El applier trabaja en tandas con contexto fresco sobre el mismo worktree (§3.7c) porque un applier único de 491 turnos costó 115M de tokens leídos —39% de una corrida entera—. Subilo solo si los fixes son triviales; bajalo a 2-3 si el juez aprobó fixes grandes o muy acoplados.
 - **`budgetTotal`**: del `+Nk` del comando si vino; **sin `+Nk` → `budgetTotal: null` (SIN tope)**. Decisión de Leo (22-jul, corrida PRD-0019: el tope +1000k cortó la corrida a 58 tokens del `minBudgetWave` dejando 2 slices y la review fleet afuera — un tope "razonable" corta donde no debe). NO le propongas un tope ni frenes esperando confirmación: lanzá sin cap e informale el costo estimado de referencia (`~150k × issues + 300k`, la regla vieja de 100k/issue quedó corta) para que sepa qué esperar. Con `+Nk` explícito el comportamiento no cambia: hard cap — es la forma deliberada de Leo de limitar una corrida.
 - **`ts`**: el `date -Iseconds` del pre-flight.
+- **`readCli`**: `${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh` **resuelto a path absoluto** — el script del Workflow no ve variables de entorno del plugin.
+- **`scopeInicial`**: la salida de `pipeline-read.sh scope` de acá abajo, ya parseada a objeto. El motor la reusa en la wave 1 en vez de despachar un agente; `null` la saltea sin romper nada.
 
 ### 3 — Confirmar y lanzar
 
-Mostrale a Leo: scope resuelto (cuántas issues ve `gh issue list`), rama integradora, tiering elegido, budget. Con `--dry-run`: terminar acá.
+Con la rama ya resuelta, mirá el scope como lo va a ver el motor — misma tabla de bucketing, antes de gastar un token:
+
+```bash
+sh "${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh" scope '<scope>' --rama <rama>
+```
+
+Mostrale a Leo: los buckets de esa salida (cuántas IMPLEMENTABLE, MERGE_READY, bloqueadas), rama integradora, tiering elegido, budget. Las `SPEC` son las issues padre: no se despachan, son la intención contra la que revisa el eje Spec de la fleet. Con `--dry-run`: terminar acá.
 
 Confirmado (o corrida AFK ya autorizada por el prompt inicial):
 
@@ -56,7 +68,7 @@ Confirmado (o corrida AFK ya autorizada por el prompt inicial):
 Workflow({
   scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/prd-pipeline.js",
   args: { ts, runLabel, repo: <pwd>, scope, base, rama, models, tiers, issueTiers,
-          efforts, issueEfforts, applierChunk,
+          efforts, issueEfforts, applierChunk, readCli, scopeInicial,
           validateHook, testGlobs, denyPaths, requiredChecks, labels,
           maxParallel, maxWaves, budgetTotal, minBudgetWave: 300000 }
 })
@@ -73,6 +85,7 @@ Crash/kill → **`resumeFromRunId` SOLO si nada cambió a mano desde el corte** 
 - No crea issues (eso es `mattpocock-skills:to-tickets`, invocado por Leo).
 - No mergea la rama integradora a la base: el PR final queda **draft** para el botón verde de Leo.
 - No re-decide tiers en runtime: el tiering se pinnea al lanzar (idem efforts).
+- No escribe en GitHub desde el pre-flight: `pipeline-read.sh` es solo lectura. Los edges de dependencia que el `check` reclama los crea Leo, con los comandos que el propio check imprime.
 - No recorta la review fleet para ahorrar: el número de unidades y las 2 lentes + integración son cobertura, no lujo. El ahorro sale de pre-filtrar el diff por unidad (§3.7b) y de trocear al applier (§3.7c), no de mirar menos.
 
 ## Contrato por repo (opcional, `.host-orchestrator/config.json`)

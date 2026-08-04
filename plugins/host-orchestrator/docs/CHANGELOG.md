@@ -2,6 +2,18 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.4.0 (2026-08-04)
+
+**El pipeline deja de tener contrato propio: consume los artefactos de la suite de Matt tal como salen** (leo-stack #10, ejecutado en #24). Detalle de cada mecanismo en la spec §3.13.
+
+Breaking para quien escribiera briefs: **el `## Agent Brief` muere**. El contrato es el body del ticket, y la intención sube por la escalera al spec padre. No había gate que perder — la regla `IMPLEMENTABLE` nunca chequeó que existiera un brief, así que una issue sin él ya se despachaba igual y bloqueaba recién con un worktree quemado.
+
+Pieza nueva: **`scripts/pipeline-read.sh`** (POSIX sh, solo `gh`), el lado de lectura del pipeline, con test y fixtures. `scope` bucketea sobre el grafo nativo de GitHub, `check` corre las precondiciones y `intent <issue>` devuelve la escalera de intención (spec padre, índice de ADRs, rama de prototipo). Se corre a mano antes de lanzar: hasta hoy, lo que el pipeline iba a hacer era invisible hasta que el scout reportaba. Solo lectura, con candado verificado en código — `gh api` conmuta a POST en cuanto ve un `-f`, y el mismo endpoint que lee las sub-issues, con POST, agrega una.
+
+En consecuencia: el **scout pasa a transporte** (corre el CLI y devuelve stdout; la wave 1 reusa el pre-fetch de T0 y no despacha agente), las **dependencias y el spec padre salen del grafo nativo** sin fallback textual —con un `check` que falla ruidoso e imprime los `gh api` exactos en los repos heredados—, el **spec no se despacha** (bucket `SPEC`, detectado estructuralmente), el **anclaje a evidencia real pasa a runtime** (`recursos_verificados` con cómo y cuándo, `RESOURCE_UNREACHABLE` si no se llega, y la verificación viaja al body del PR), y la **review fleet gana el eje Spec**: un reviewer sobre el diff integrado completo, con el scope creep ruteado a HUMANO y nunca a APLICAR.
+
+Bug de paso, en la fleet: la lente se pegaba a cada finding *después* de filtrar los reviewers muertos, así que un reviewer caído corría los índices y etiquetaba mal todo lo que seguía.
+
 ## 4.3.1 (2026-08-04)
 
 Dos marcadores `<!-- acta -->` para el gate del estándar (leo-stack #25): las menciones de `/parallel-implement-wave`, `/merge-orchestrate` y `/goal` en el README y en `/prd-pipeline` son historia declarada, no sediment vivo. Sin cambios de comportamiento.

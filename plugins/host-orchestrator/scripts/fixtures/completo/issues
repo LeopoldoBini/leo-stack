@@ -1,0 +1,3 @@
+100	open		0	2		Spec: checkout end-to-end	Spec padre.
+101	open	ready-for-agent	0	0	100	Slice A: carrito	Part of #100
+102	open	ready-for-agent	0	0	100	Slice B: pago	Part of #100

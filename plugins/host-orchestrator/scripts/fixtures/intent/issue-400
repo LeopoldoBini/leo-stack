@@ -1,0 +1,1 @@
+400	open		0	3		Spec: checkout end-to-end	# Checkout\n\n## Implementation Decisions\n\n- Stripe como PSP.\n\n## Testing Decisions\n\n- Seam: el puerto PasarelaDePago se testea con un doble en memoria.\n- El repositorio de ordenes va contra la base real.\n\n## Out of Scope\n\n- Reembolsos parciales.\n- Multi-moneda.\n

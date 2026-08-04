@@ -19,7 +19,7 @@ El motor v3 funciona, pero sus reglas viven en prosa que el modelo *interpreta* 
 ## 2. Decisiones ya tomadas (constraints — no re-litigar)
 
 1. **Política de rama por milestone, siempre:** el pipeline crea `prd/<milestone>` al arrancar; los PRs de las issues apuntan a esa rama; al final queda UN PR `prd/X → base` para el botón verde de Leo. La base siempre deployable. Refresh por tanda (antes de cada wave, traer lo nuevo de la base). PRDs en paralelo solo si Leo decide que no se pisan. («base» = `base_branch` del config; en SaltaCompra, `master`.)
-2. **Las issues de GitHub se quedan** como backlog durable e input (`milestone:X`): briefs `## Agent Brief`, deps `Blocked by`, trazabilidad issue→PR. Cambia el motor, no el contrato.
+2. **Las issues de GitHub se quedan** como backlog durable e input (`milestone:X`): el **body del ticket** como contrato, el **grafo nativo** de dependencias y sub-issues, trazabilidad issue→PR. Cambia el motor, no el contrato. (Revisado en 4.4.0: el contrato de entrada pasó a ser el de la suite de Matt tal como sale — ver §3.13.)
 3. **Motor genérico en el plugin + contrato fino por repo** (hook de validación, base branch, runtime). Ambición: publicable.
 4. **Roadmap:** PRD-0017 cierra con motor v3 → Piloto 1 = ratchet TS (App.SaltaCompra) → construir v4 → Piloto 2 = PRD-0016 supervisado.
 5. **Invocación explícita SIEMPRE:** la entrada es un slash command tipeado por Leo. El Workflow tool además exige opt-in explícito — doble candado, compatible con la regla del marketplace.
@@ -31,14 +31,14 @@ Leo tipea:  /prd-pipeline milestone:PRD-0016          (slash command, host-orche
    │
    ▼
 Comando (markdown, delgado):
-   lee .host-orchestrator/config.json → valida preconds → compone args
+   lee .host-orchestrator/config.json → pipeline-read.sh check → compone args
    └─ Workflow({ scriptPath: <plugin>/workflows/prd-pipeline.js, args })
    │
    ▼
 Script JS (determinístico, corre en background):
    Fase 0  Setup        agente serializador: crea/actualiza rama prd/X, baseline
    Loop    Waves        while (hay issues accionables && budget.remaining()):
-     0.    Scout        agente T3: estado issues/PRs → buckets (JSON schema)
+     0.    Scout        transporte T3: corre pipeline-read.sh scope → buckets (§3.13c)
      1.    Refresh      serializador: merge base→prd/X; conflicto → merge-resolver
      2.    Merge wave   por PR MERGE_READY: validar → merge-resolver → merge (serial)
      3.    Impl wave    fan-out implementers T1 en worktrees (paralelo)
@@ -61,7 +61,7 @@ Script JS (determinístico, corre en background):
 
 | Rol | Rango | Effort | Hace | NO hace |
 |---|---|---|---|---|
-| **scout** | T2–T3 | low | `gh issue/pr list --json` → buckets estructurados | juicio, mutación |
+| **scout** | T2–T3 | low | correr `pipeline-read.sh scope` y devolver su stdout (§3.13c) | bucketear él mismo, juicio, mutación |
 | **implementer** | T0–T1 | (sesión) | TDD + vertical slice en su worktree (disciplina actual de `parallel-implementer.md`) | push, `gh pr *`, salir del worktree |
 | **fixer mecánico** | T2 | medium | remediación bien especificada y verificable por gate (tipos, lint, codemods) — NO features | ídem implementer |
 | **validator** | T2–T3 | low | ejecuta `wave-validate.sh --json` (o autodetect) y reporta NÚMEROS via schema | decidir si pasa — eso es del script |
@@ -164,11 +164,11 @@ Restricción heredada: sin `Date.now()` en el script → timestamps entran por `
 
 Contexto de la decisión: la v4 tiene vocación de **reemplazar el flujo de implementación paralela autónoma completo** — la duplicación de prompts con engineering-workflow era transitoria y quedó saldada: ese fork se retiró en la reconstrucción de 2026-08 (ver `DEFUNCIONES.md` del marketplace) y la review interactiva hoy es `mattpocock-skills:code-review`.
 
-**La cobertura de la fleet NO es palanca de ahorro (decidido 2026-07-27).** El número de unidades (≤6), las 2 lentes por unidad y el reviewer de integración se mantienen: el gate es puramente numérico (typecheck + tests + ratchet), así que la fleet es lo único que ve arquitectura, seams, OWASP y contratos cruzados antes del PR final draft. Y el judge filtra falsos positivos pero **no puede recuperar falsos negativos**: lo que el reviewer nunca vio, nadie lo ve. El ahorro sale de §3.7b y §3.7c, que no tocan qué se mira.
+**La cobertura de la fleet NO es palanca de ahorro (decidido 2026-07-27).** El número de unidades (≤6), las 2 lentes por unidad, el reviewer de integración y el del eje Spec (§3.13d) se mantienen: el gate es puramente numérico (typecheck + tests + ratchet), así que la fleet es lo único que ve arquitectura, seams, OWASP y contratos cruzados antes del PR final draft. Y el judge filtra falsos positivos pero **no puede recuperar falsos negativos**: lo que el reviewer nunca vio, nadie lo ve. El ahorro sale de §3.7b y §3.7c, que no tocan qué se mira.
 
 #### 3.7b Alcance de lectura pre-filtrado
 
-Cada reviewer corre `git diff origin/<base>...HEAD -- <paths de SU unidad>` en vez del diff integrado completo (fallback `.` si el particionador no reportó paths: degrada el ahorro, nunca la cobertura). Sin esto, los 13-15 reviewers releen el mismo diff completo y cada uno paga ~2,5M de contexto. Mismas unidades, mismas lentes, mismo modelo: solo se deja de pagar N veces lo mismo.
+Cada reviewer **por unidad** corre `git diff origin/<base>...HEAD -- <paths de SU unidad>` en vez del diff integrado completo (la excepción es el eje Spec de §3.13d, que por diseño necesita verlo entero) (fallback `.` si el particionador no reportó paths: degrada el ahorro, nunca la cobertura). Sin esto, los 13-15 reviewers releen el mismo diff completo y cada uno paga ~2,5M de contexto. Mismas unidades, mismas lentes, mismo modelo: solo se deja de pagar N veces lo mismo.
 
 #### 3.7c Applier por tandas
 
@@ -204,7 +204,7 @@ El applier aplica los fixes del juez en tandas de `applier_chunk` (default 4). L
 scripts/wave-validate.sh            (existente; NUEVO modo --json, ver §3.3)
 ```
 
-Issues: mismo contrato de hoy (label `ready-for-agent`, `## Agent Brief`, `Blocked by`).
+Issues: label `ready-for-agent`, body del ticket como contrato, dependencias y spec padre por grafo nativo (§3.13).
 
 **Ratchets ortogonales como deny-lists (aprendizaje Piloto 1):** si el repo tiene otros guards/ratchets (ej. doctrine-guard, deuda declarada por ADR), sus dominios van en `deny_paths` y en el `excluye` de cada prompt — un agente que "mejora" código vedado por otro ratchet produce PRs que ese ratchet rechaza (pasó con routes-deuda ADR-0023: 2 PRs revertidos). Los ratchets del repo no se negocian entre sí: se excluyen por adelantado.
 
@@ -224,6 +224,43 @@ Patrones de referencia en `App.SaltaCompra:.host-orchestrator/pilots/ratchet-ts.
 3. **Budget por `args` con log de fuente:** la directiva "+N" del turno demostró ser frágil (llegó null y el corte nunca gatilló) → fuente primaria `args.budgetTotal`, fallback `budget.total`, y `log()` de qué fuente quedó activa (o "sin tope").
 4. **Mediciones inmunes al harness:** los prompts de validators fijan timeouts explícitos por comando (los defaults del harness matan un `tsc`/`test` largo) y semántica de error (`status:'error'` del hook → campo `error` + sentinelas −1; el gate lo trata como fallo de medición, nunca como datos).
 5. **Los reintentos de gate re-usan el worktree** (el retry-fixer recibe el path y los motivos numéricos exactos del gate); worktrees de gates FAIL se conservan para autopsia.
+
+### 3.13 Contrato de entrada: los artefactos de la suite de Matt, tal como salen (4.4.0)
+
+**El pipeline deja de tener contrato propio.** Nueve decisiones cerradas en leo-stack #10, ejecutadas en #24. Lo que cambia:
+
+- **El `## Agent Brief` muere.** El contrato es el **body del ticket**; la escalera sube al spec padre (`## Implementation Decisions`, `## Testing Decisions`, `## Out of Scope`), escrito una vez por feature en vez de copiado a cada ticket. No había gate que perder: la regla `IMPLEMENTABLE` nunca chequeó que existiera un brief, así que una issue sin brief ya se despachaba igual y bloqueaba recién con un worktree quemado.
+- **Deps y spec padre por grafo nativo, sin fallback textual.** `issue_dependencies_summary.blocked_by` cuenta solo bloqueantes ABIERTOS: es el gate del scout como entero de GitHub en vez de un LLM leyendo prosa. `parent_issue_url` localiza el spec. Trampa de herramienta: **`gh issue list --json` no expone ninguno de los dos** — hay que ir por `gh api`. Los repos heredados fallan ruidoso en precondiciones (§3.13b).
+- **El spec no se despacha.** Se detecta estructuralmente —`sub_issues_summary.total > 0` o alguien del scope apuntándole— y sale en su propio bucket `SPEC`. Upstream le pone `ready-for-agent` al spec entero y a todos los slices porque su `/implement` lo invoca un humano ticket por ticket; nuestro pipeline despacha solo, así que el filtro tiene que ser del motor. Los slices HITL los baja el humano a `ready-for-human` al aprobar la tanda.
+- **El anclaje a evidencia real pasa a runtime.** Muerto el brief, `**Real resources:**` pierde su lugar como sección escrita en planificación: el implementer verifica cada recurso vivo contra el recurso REAL desde su worktree, reporta *cómo y cuándo* en `recursos_verificados` (que el serializer copia al body del PR) y bloquea con `RESOURCE_UNREACHABLE` si no llega. Ataca la causa que leo-stack #12 midió: un snapshot envejece; un chequeo en runtime es fresco por construcción.
+
+#### 3.13b El CLI de lectura — `scripts/pipeline-read.sh`
+
+POSIX sh usando solo `gh` (su `--jq` incorporado evita el jq externo). Tres subcomandos, **lectura y nada más**:
+
+| | qué devuelve | quién lo corre |
+|---|---|---|
+| `scope <tipo:valor> --rama <r>` | el JSON del `SCOUT_SCHEMA` ya bucketeado | T0 en el pre-flight; el transporte por wave |
+| `check <tipo:valor>` | precondiciones, con los `gh api` exactos del remedio | T0, antes de crear ninguna rama |
+| `intent <issue>` | spec padre (`out_of_scope` + `testing_decisions`), índice de ADRs, rama de prototipo | implementer de entrada; merge-resolver bajo disparador |
+
+**Por qué un script y no JS del motor:** una sola implementación de la tabla de bucketing (en los dos, divergen sin que nadie se entere), **testeable** con fixtures (`scripts/test-pipeline-read.sh`) e **inspeccionable** — se corre y se ve qué va a hacer el pipeline *antes* de lanzarlo; hoy eso era invisible hasta que el scout reportaba.
+
+**La asimetría lectura/escritura es la decisión de diseño.** En lectura el determinismo es gratis y el peor caso de un bug es una respuesta equivocada que el gate atrapa; en escritura, romper estado remoto no lo atrapa nadie. Por eso el serializador **no se toca** y el CLI lleva candado: toda consulta va con `--method GET` verificado en código — `gh api` conmuta a POST en cuanto ve un `-f`, y el mismo endpoint que LEE las sub-issues, con POST, AGREGA una.
+
+Tres trampas de sh que costaron una corrida cada una y quedan cubiertas por el test: `gh` se come el stdin de un `while read` (va `</dev/null`), un `printf` sin `\n` final hace que `read` descarte el último ítem, y el endpoint `dependencies/blocked_by` lista **todos** los bloqueantes mientras el summary cuenta solo los abiertos.
+
+**Límite declarado:** las fixtures guardan la salida ya filtrada por `--jq`, así que el test ejercita la tabla de decisión —lo que puede divergir— y no las expresiones jq. Esas se validan corriendo el CLI contra un repo real.
+
+#### 3.13c El scout es transporte, no juicio
+
+Sus seis reglas de bucketing eran booleanas y ninguna necesita el body: hoy pedía `--json …,body --limit 200`, metiendo hasta 200 bodies en un contexto LLM por wave para responder seis booleanos. Ahora corre el CLI y devuelve stdout — un turno, T3, effort low. **La wave 1 ni eso**: reusa el `scopeInicial` que T0 ya trajo en el pre-flight. La frescura por wave se conserva: el estado cambia entre waves y por eso las siguientes vuelven a correr el comando.
+
+#### 3.13d Eje Spec en la review fleet: +1 reviewer, no +6
+
+La fleet no tenía eje Spec. Entra **un solo** reviewer sobre el **diff integrado completo** (el único que lo ve entero, contra el pre-filtrado de §3.7b) porque el scope creep es una pregunta de *todo el diff contra todo el spec*: fragmentarlo por unidad le da a cada reviewer un pedazo de cada uno, que es la receta del falso positivo — "esto no lo pidió nadie" cuando sí, en la sección que no le tocó. Los specs salen de los `parent_issue_url` distintos del scope, así que un milestone que cruza dos specs los recibe a los dos.
+
+**Ruteo:** sus hallazgos de scope creep entran al juez pero van a **HUMANO, nunca a APLICAR** — "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los que señalan un requisito *incumplido* sí pueden ir a APLICAR. Precondición del ruteo: la lente se pega a cada finding **antes** de filtrar los reviewers muertos; filtrando primero, un reviewer caído corre los índices y etiqueta mal todo lo que sigue.
 
 ## 4. Migración v3 → v4
 
