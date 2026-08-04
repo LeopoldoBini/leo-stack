@@ -134,6 +134,26 @@ Los otros tres: **ninguno** — sin instalaciones registradas ni menciones en `s
 
 ---
 
+## 2026-08-04 — Retiro de los dos comandos standalone de `host-orchestrator`
+
+`/parallel-implement-wave` y `/merge-orchestrate` se retiran en `host-orchestrator` 4.2.0 — comandos dentro de un plugin que sigue vivo, así que el diff de huérfanos **no los detecta**: quien actualice el plugin simplemente deja de verlos. Figuran acá por el mapeo al reemplazo, que es lo que este archivo aporta.
+
+Decidido en [Estándar de calidad: orden y profundidad de la reescritura](https://github.com/LeopoldoBini/leo-stack/issues/9), ejecutado en [host-orchestrator a estándar](https://github.com/LeopoldoBini/leo-stack/issues/21). Los motivos: eran 971 de las ~1.070 líneas de comandos del plugin, el motor v4 nunca los invocó (sus dos `agentType:` apuntan a los **agentes**, que se quedan), y sus gates evaluaban contra infra borrada en v4.0.0 (`/goal`, `state.json`).
+
+| Pieza | Reemplazo |
+|---|---|
+| `/parallel-implement-wave` | `/prd-pipeline` (motor v4: impl wave paralela dentro del pipeline) |
+| `/merge-orchestrate` | `/prd-pipeline` (motor v4: merge wave serial dentro del pipeline) |
+| Modo "wave sin merge" | **sin reemplazo** — recuperarlo sería un `--solo-implement` del motor, fuera del mapa de la reconstrucción |
+
+Los agentes `parallel-implementer` y `merge-resolver` **no mueren**: son el músculo del motor v4.
+
+Repos damnificados: **ninguno que migre** — el plugin sigue en el índice; los 10 repos con `host-orchestrator` instalado reciben el retiro con el `claude plugin update` normal.
+
+**Marca de rescate:** `rescate/comandos-standalone` — `git show rescate/comandos-standalone:plugins/host-orchestrator/commands/<archivo>`.
+
+---
+
 ## Retroactivas
 
 ### 2026 (fecha exacta desconocida) — `merge-orchestrator` 0.1.0 → `host-orchestrator`

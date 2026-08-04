@@ -73,7 +73,7 @@ Script JS (determinístico, corre en background):
 
 **Evidencia del Piloto 1 (2026-07-17, 53 agentes):** fixers T2 (sonnet) 9/9 gates sin reintentos en remediación mecánica (~42k output/nodo); validator T3 (haiku) 25/25 mediciones (~2k out); serializer T2 14/14. El costo real de un fixer son sus **cache-reads** (~35M/nodo), no su output — el tier del modelo importa menos que la cantidad de nodos y re-lecturas. De ahí el rol "fixer mecánico" T2.
 
-**Principio de elección (grilling 2026-07-16): modelo mínimo suficiente.** Dentro del rango del rol, el orquestador elige el tier más barato que cumple la vara de correctitud del nodo; escala solo donde el error es caro o irreversible. Doble objetivo explícito: máxima correctitud Y eficiencia de tokens (junto con el tope de presupuesto de §6.5).
+**Principio de elección (grilling 2026-07-16): modelo mínimo suficiente.** Dentro del rango del rol, el orquestador elige el tier más barato que cumple la vara de correctitud del nodo; escala solo donde el error es caro o irreversible. Doble objetivo explícito: máxima correctitud Y eficiencia de tokens (junto con la política de presupuesto de §6.5).
 
 ### 3.1b Effort por rol — y dónde está REALMENTE el costo
 
@@ -162,7 +162,7 @@ Restricción heredada: sin `Date.now()` en el script → timestamps entran por `
 
 **DECIDIDO (grilling 2026-07-16, opción A):** fase nativa del workflow — reviewers (fan-out por superficie) → judge → appliers, con los prompts de review-fleet PORTADOS a host-orchestrator, sobre el diff integrado `prd/X..base`. Los fixes aprobados van en UN commit/PR `review/<slug>` → `prd/X` que pasa por el mismo gate. Motor autocontenido y publicable; la revisión hereda pinneo de modelos, orden y presupuesto.
 
-Contexto de la decisión: la v4 tiene vocación de **reemplazar el flujo de implementación paralela autónoma completo** — la duplicación de prompts con engineering-workflow es transitoria, no deuda permanente. La versión interactiva de review-fleet sigue existiendo para uso manual.
+Contexto de la decisión: la v4 tiene vocación de **reemplazar el flujo de implementación paralela autónoma completo** — la duplicación de prompts con engineering-workflow era transitoria y quedó saldada: ese fork se retiró en la reconstrucción de 2026-08 (ver `DEFUNCIONES.md` del marketplace) y la review interactiva hoy es `mattpocock-skills:code-review`.
 
 **La cobertura de la fleet NO es palanca de ahorro (decidido 2026-07-27).** El número de unidades (≤6), las 2 lentes por unidad y el reviewer de integración se mantienen: el gate es puramente numérico (typecheck + tests + ratchet), así que la fleet es lo único que ve arquitectura, seams, OWASP y contratos cruzados antes del PR final draft. Y el judge filtra falsos positivos pero **no puede recuperar falsos negativos**: lo que el reviewer nunca vio, nadie lo ve. El ahorro sale de §3.7b y §3.7c, que no tocan qué se mira.
 
@@ -213,7 +213,7 @@ Issues: mismo contrato de hoy (label `ready-for-agent`, `## Agent Brief`, `Block
 - **Base de los worktrees:** el worktree de `isolation: 'worktree'` nace del HEAD de la sesión, que no está garantizado. Por eso el PRIMER paso obligatorio de cada implementer es `git fetch && git checkout -B issue-<N> origin/prd/<X>` — la base correcta se toma del remoto, independiente de dónde esté parada la sesión.
 - **Gate rojo → reintento:** 1 reintento por issue dentro de la corrida, re-despachando el implementer con el output del gate como feedback (worktree conservado). Segundo rojo → label `agent-blocked` + comment con el log (via serializer), la wave sigue con el resto. Sin heroísmos.
 - **Permisos:** AFK real = `--dangerously-skip-permissions` (como hoy; nadie contesta prompts en background). Piloto 2 supervisado = sesión interactiva normal.
-- **Roles de agente:** los `agent()` referencian los `agents/*.md` del plugin via `agentType` (una sola fuente de disciplina, compartida con los comandos standalone).
+- **Roles de agente:** los `agent()` referencian los `agents/*.md` del plugin via `agentType` (una sola fuente de disciplina).
 
 ### 3.12 Hardening del script (aprendizajes Piloto 1, 2026-07-17 — obligatorios en el motor)
 
@@ -230,7 +230,7 @@ Patrones de referencia en `App.SaltaCompra:.host-orchestrator/pilots/ratchet-ts.
 | Pieza v3 | Destino v4 |
 |---|---|
 | `/afk-pipeline` | **Borrado directo en v4.0.0** — reemplazado por `/prd-pipeline` (breaking; decidido en grilling) |
-| `/parallel-implement-wave`, `/merge-orchestrate` | **Se quedan** como herramientas manuales standalone (uso interactivo puntual) |
+| `/parallel-implement-wave`, `/merge-orchestrate` | **Retirados en v4.2.0** (leo-stack #21) — el motor nunca los invocó y sus gates evaluaban contra infra borrada en v4.0.0; recuperar el modo "wave sin merge" sería un `--solo-implement` del motor. Rescate: tag `rescate/comandos-standalone` |
 | `agents/parallel-implementer.md`, `merge-resolver.md` | **Se quedan** — los `agent()` del workflow los referencian via `agentType` (o prompts portados) |
 | `cc-afk` | Simplificado (§3.8) |
 | `.host-orchestrator/pipelines/*.state.json`, `PROGRESS.md` | **Eliminados** (GitHub + journal + audit log los cubren) |
@@ -249,9 +249,9 @@ Aprendizajes del piloto 1 se incorporan a la spec ANTES de construir el motor co
 
 1. ~~Review fleet~~ ✅ RESUELTO: opción A — fase nativa con prompts portados (ver §3.7). La v4 aspira a reemplazar el flujo autónomo completo.
 2. ~~Frescura del scout en replay~~ ✅ RESUELTO: resume solo si nada cambió a mano; si no, corrida fresca (ver §3.5). Sin cache-busting.
-3. ~~`agentType` vs prompts inline~~ ✅ RESUELTO (decisión CTO): `agentType` referenciando los `agents/*.md` del plugin — una sola fuente de verdad para la disciplina, compartida con los comandos standalone; el plugin se publica entero (agents/ + workflows/), así que no rompe la autocontención.
+3. ~~`agentType` vs prompts inline~~ ✅ RESUELTO (decisión CTO): `agentType` referenciando los `agents/*.md` del plugin — una sola fuente de verdad para la disciplina; el plugin se publica entero (agents/ + workflows/), así que no rompe la autocontención.
 4. ~~Semántica de "tests propios"~~ ✅ RESUELTO: opción B — derivado del diff (ver §3.3).
-5. ~~Presupuesto~~ ✅ RESUELTO: tope SIEMPRE, proporcional al tamaño del milestone (monto por issue = decisión técnica, se calibra en los pilotos). Al agotarse: cortar limpio al final de la wave en curso + reporte de pendientes (retomable con corrida fresca). El script chequea `budget.remaining()` en cada boundary de wave.
+5. ~~Presupuesto~~ ✅ RESUELTO (revisado en v4.0.8): **sin `+Nk` la corrida va SIN tope** (`budgetTotal: null`); el `+Nk` queda como hard cap deliberado de Leo — decisión del 22-jul tras la corrida PRD-0019, donde un tope "razonable" (+1000k) cortó a 58 tokens del `minBudgetWave` dejando 2 slices y la review fleet afuera. Con tope: cortar limpio al final de la wave en curso + reporte de pendientes (retomable con corrida fresca); el script chequea `budget.remaining()` en cada boundary de wave. Referencia de costo: ~150k × issues + 300k.
 6. ~~Scopes~~ ✅ RESUELTO: los cuatro alcances de hoy (`milestone:` / `label:` / `parent:#N` / lista explícita). La rama integradora se nombra por alcance: `prd/<milestone>` o `batch/<slug>`. Mismo motor, misma política de rama.
 7. ~~Deprecación~~ ✅ RESUELTO: borrar `/afk-pipeline` directo en v4.0.0 (breaking, precedente v3/Docker). Único usuario = Leo; dos motores en paralelo es la confusión que queremos evitar. `cc-afk` avisa si se invoca con sintaxis vieja.
 

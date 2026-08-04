@@ -1,13 +1,10 @@
 ---
 name: prd-pipeline
-description: Motor v4 Workflow-nativo del pipeline AFK — reemplaza a /afk-pipeline. Lanza el workflow determinístico (workflows/prd-pipeline.js) que implementa+mergea las issues de un scope sobre una rama integradora, con gate como código, review fleet nativa y PR final draft para el botón verde de Leo. Usage `/prd-pipeline milestone:<name> [+800k]` (también `label:`, `parent:#N`, lista `#42,#43`); sin `+Nk` la corrida va SIN tope (el `+Nk` es un hard cap deliberado). La sesión que lo lanza es el orquestador T0 y decide el tiering por nodo.
+description: Lanza el pipeline AFK v4 — workflow determinístico que implementa y mergea las issues de un scope (milestone/label/parent/lista) sobre una rama integradora, con gate numérico, review fleet nativa y PR final draft. Usage `/prd-pipeline <scope> [+Nk]`.
+disable-model-invocation: true
 ---
 
 # /prd-pipeline
-
-## ⛔ Invocation gate — check BEFORE doing anything
-
-Proceed ONLY if the user explicitly typed `/prd-pipeline` themselves (or the session's initial prompt, e.g. via the `cc-afk` alias, instructs running it). If YOU decided that some plan, review result, or "apply everything" request should become a pipeline — **STOP NOW**: do not create branches, do not launch any Workflow. Tell Leo what you would run and let HIM invoke it. Rule of this marketplace: orchestration commands are never auto-invoked by the model.
 
 **Spec de referencia (leela ante cualquier duda):** `docs/SPEC-v4-workflow-engine.md` en este plugin — el motor es la materialización 1:1 de esa spec.
 
@@ -73,7 +70,7 @@ Crash/kill → **`resumeFromRunId` SOLO si nada cambió a mano desde el corte** 
 
 ## Qué NO hace
 
-- No crea issues ni briefs (eso es `/to-issues` de engineering-workflow).
+- No crea issues (eso es `mattpocock-skills:to-tickets`, invocado por Leo).
 - No mergea la rama integradora a la base: el PR final queda **draft** para el botón verde de Leo.
 - No re-decide tiers en runtime: el tiering se pinnea al lanzar (idem efforts).
 - No recorta la review fleet para ahorrar: el número de unidades y las 2 lentes + integración son cobertura, no lujo. El ahorro sale de pre-filtrar el diff por unidad (§3.7b) y de trocear al applier (§3.7c), no de mirar menos.
