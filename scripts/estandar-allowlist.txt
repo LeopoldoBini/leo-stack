@@ -1,0 +1,66 @@
+# Allowlist del estándar de calidad — insumo de scripts/check-estandar.sh
+#
+# Tres secciones. Todo lo declarado acá es una excepción consciente: el script
+# no la reporta. Lo que no está declarado y no existe en el repo, sí.
+#
+#   [externos]  comandos de otros marketplaces que este repo referencia con
+#               legitimidad. Mantener la lista al día ES el chequeo: cuando
+#               upstream renombra o retira uno, el redirect muere en silencio
+#               y esta línea es el único lugar donde queda registrado.
+#
+#   [retirados] comandos que existieron acá y se retiraron. Mencionarlos es
+#               legítimo SOLO en un acta —`docs/**`, `CHANGELOG.md`,
+#               `DEFUNCIONES.md`— o dentro de una región `<!-- acta -->`.
+#               En un archivo vivo (`commands/`, `agents/`, `README.md`) un
+#               comando retirado sigue siendo sediment.
+#
+#   [paths]     rutas que un archivo nombra con razón aunque no existan en
+#               este repo: viven en el repo consumidor, no acá.
+#
+# Formato: un ítem por línea, `#` inicia comentario. Los comandos van sin la
+# barra inicial y sin namespace (`prd-pipeline`, no `/host-orchestrator:prd-pipeline`).
+
+[externos]
+# mattpocock-skills 1.2.0 — la suite oficial sobre la que este stack es overlay
+setup-matt-pocock-skills
+to-tickets
+to-spec
+grill-with-docs
+domain-modeling
+grilling
+prototype
+research
+code-review
+# Claude Code, built-in
+workflows
+plugin
+config
+init
+
+[retirados]
+# host-orchestrator v4.2.0 (leo-stack #21) — tag rescate/comandos-standalone
+parallel-implement-wave
+merge-orchestrate
+# host-orchestrator v4.0.0 — reemplazado por /prd-pipeline
+afk-pipeline
+# v4.0.0 — el loop dejó de ser de turnos
+goal
+# engineering-workflow, retirado en leo-stack #19; lo que sobrevive es /init
+init-workflow
+context-bootstrap
+agent-brief
+# leo-stack #12 — la sonda murió, la sección de recursos reales quedó
+sandcastle-probe-resources
+
+[paths]
+# Artefactos del repo consumidor, no de este marketplace
+.host-orchestrator/config.json
+.host-orchestrator/pipelines/*.state.json
+scripts/wave-validate.sh
+wave-validate.sh
+CONTEXT.md
+package.json
+tsconfig.json
+PROGRESS.md
+state.json
+.state.json

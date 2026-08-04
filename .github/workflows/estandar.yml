@@ -1,0 +1,19 @@
+# Red, no barrera: los commits siguen yendo directo a `main`. Esto solo hace
+# ruido cuando algo entró violando el estándar (leo-stack #9 §5, #25).
+# Corre en toda rama y no solo en `main` para que el gate se pueda probar sin
+# tener que romper `main` para verlo fallar.
+name: estándar
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reglas duras sobre plugins/**
+        run: bash scripts/check-estandar.sh
+      - name: El gate todavía detecta
+        run: bash scripts/test-check-estandar.sh

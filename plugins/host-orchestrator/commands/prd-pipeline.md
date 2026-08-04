@@ -89,4 +89,4 @@ cc-afk() {
 }
 ```
 
-Muertos vs v3: `/goal`, `CLAUDE_CODE_MAX_TURNS`, `AUTO_COMPACT_WINDOW`, `DISABLE_THINKING` — el loop ya no es de turnos. Sobreviven solo los timeouts. Supervisado (recomendado para corridas nuevas): sesión interactiva normal, sin `--dangerously-skip-permissions`.
+Muertos vs v3: `/goal`, `CLAUDE_CODE_MAX_TURNS`, `AUTO_COMPACT_WINDOW`, `DISABLE_THINKING` — el loop ya no es de turnos. Sobreviven solo los timeouts. Supervisado (recomendado para corridas nuevas): sesión interactiva normal, sin `--dangerously-skip-permissions`. <!-- acta -->

@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.3.1 (2026-08-04)
+
+Dos marcadores `<!-- acta -->` para el gate del estándar (leo-stack #25): las menciones de `/parallel-implement-wave`, `/merge-orchestrate` y `/goal` en el README y en `/prd-pipeline` son historia declarada, no sediment vivo. Sin cambios de comportamiento.
+
 ## 4.3.0 (2026-08-04)
 
 Comando nuevo **`/init`** — onboarding de un repo al pipeline AFK, nacido a estándar (leo-stack #23). Es lo que sobrevive de `/init-workflow` del retirado `engineering-workflow`: el bloque de pipeline de siete pasos muere (existía en 3 de 15 repos, los 3 podridos; el orden canónico lo publica `mattpocock-skills` con `/setup-matt-pocock-skills`) y queda la pieza que ningún cómputo suple — **la regla HITL**: al aprobar el breakdown de `/to-tickets`, los slices que necesiten humano bajan a `ready-for-human`, porque el motor despacha solo lo que lleva `ready-for-agent` (leo-stack #10 §8).

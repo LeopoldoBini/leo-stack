@@ -43,7 +43,7 @@ host-orchestrator/
     └── merge-resolver.md                  # 5 criterios de no-regresión; recomienda
 ```
 
-Los comandos standalone `/parallel-implement-wave` y `/merge-orchestrate` se retiraron en 4.2.0 — ver `DEFUNCIONES.md` del marketplace y el tag `rescate/comandos-standalone`.
+Los comandos standalone `/parallel-implement-wave` y `/merge-orchestrate` se retiraron en 4.2.0 — ver `DEFUNCIONES.md` del marketplace y el tag `rescate/comandos-standalone`. <!-- acta -->
 
 ## Requisitos
 
