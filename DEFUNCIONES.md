@@ -99,7 +99,38 @@ Repos damnificados:
 
 El plugin se parte: `/analizar` sobrevive y se muda a `leo-tools` ([#20](https://github.com/LeopoldoBini/leo-stack/issues/20)) por ser un checkpoint pre-ejecución que interpreta dictado por voz, sin equivalente upstream. El comando `/revisar_trabajo` y su agente mueren acá.
 
+El nombre `review-flow` muere con ellos: la mitad que lo justificaba ya no existe, así que `/analizar` no se lleva la caja — viaja en una nueva, `voice-checkpoint@leo-tools` (ver la mudanza más abajo).
+
 Repos damnificados: **ninguno** — sin instalaciones registradas ni menciones en `settings*.json`.
+
+---
+
+## 2026-08-04 — Mudanza a `leo-tools`
+
+Estos cuatro **no mueren: cambian de marketplace**. Figuran acá porque el diff que detecta huérfanos no distingue una muerte de una mudanza —quien los tenga instalados de `leo-stack` los ve igual de ausentes en el índice—, y lo que ningún cómputo puede inferir es justamente lo que este archivo aporta: la dirección nueva.
+
+Bajan por el criterio de pertenencia de [Criterio de pertenencia](https://github.com/LeopoldoBini/leo-stack/issues/2) — resuelven un problema por su cuenta, sin depender del pipeline AFK, y ese es el eje que separa `leo-stack` de `leo-tools`. Decidido en [Veredicto por plugin](https://github.com/LeopoldoBini/leo-stack/issues/6), ejecutado en [Mudar interface-lens, memory-flow, yt-transcript y /analizar a leo-tools](https://github.com/LeopoldoBini/leo-stack/issues/20).
+
+| Plugin | Dirección nueva | Nota |
+|---|---|---|
+| `interface-lens` 1.0.0 | `interface-lens@leo-tools` 1.1.0 | descriptions a estándar; los tres skills con `disable-model-invocation` |
+| `memory-flow` 2.0.0 | `memory-flow@leo-tools` 2.1.0 | idem, sin cambios de comportamiento |
+| `yt-transcript` 1.0.0 | `yt-transcript@leo-tools` 1.1.0 | idem, sin cambios de comportamiento |
+| `review-flow` 2.0.0 (`/analizar`) | **`voice-checkpoint@leo-tools` 1.0.0** | caja nueva: el nombre viejo prometía un flujo de review que murió arriba |
+
+Migrar es reinstalar desde el marketplace nuevo:
+
+```bash
+claude plugin install <plugin>@leo-tools --scope project
+```
+
+Repos damnificados:
+
+- [ ] `Proyectos/SC/sistemas/saltacompra/satelites/saltacompra-pagos` — `interface-lens@leo-stack` 1.0.0, scope project, habilitado en `settings.json`
+
+Los otros tres: **ninguno** — sin instalaciones registradas ni menciones en `settings*.json` (censo por las dos fuentes, según la lección de [#19](https://github.com/LeopoldoBini/leo-stack/issues/19)).
+
+> Sin marca de rescate nueva: `rescate/pre-reconstruccion` ya tiene a los cuatro enteros, y la copia viva está en `leo-tools`. Una mudanza no necesita red — la pieza no desaparece de ningún lado.
 
 ---
 

@@ -1,9 +1,0 @@
-{
-  "name": "memory-flow",
-  "version": "2.0.0",
-  "description": "Barrido batch de memoria: /revisar_memoria clasifica memorias del formato por-archivo (VIGENTE/STALE/GRADUABLE/OBSOLETA/FUSIONABLE) y propone graduaciones a CLAUDE.md/CONTEXT.md. Solo reporta; aplica con OK explícito. Complemento del flujo orgánico (graduar/corregir al tocar) — v2 elimina /actualizar_memoria y el agente auditor.",
-  "author": {
-    "name": "Leopoldo Bini",
-    "email": "raul.leopoldobini@gmail.com"
-  }
-}

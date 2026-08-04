@@ -1,9 +1,0 @@
-{
-  "name": "review-flow",
-  "version": "2.0.0",
-  "description": "Checkpoint pre-ejecución: /analizar verifica la comprensión antes de tocar nada, pensado para dictados por voz e instrucciones ambiguas donde una confusión fonética ES/EN cambia el trabajo.",
-  "author": {
-    "name": "Leopoldo Bini",
-    "email": "raul.leopoldobini@gmail.com"
-  }
-}

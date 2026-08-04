@@ -8,36 +8,6 @@
   },
   "plugins": [
     {
-      "name": "interface-lens",
-      "description": "Juzgar, diseñar y construir interfaces con psicología UX + brújula ética (eje ético → persuasivo → oscuro, prueba del arrepentimiento de Nir Eyal, norte time-well-spent). Base de conocimiento: 28 principios en 6 familias (disparadores, acción/fricción, recompensa, inversión, claridad, ética) organizados como bucle disparador→acción→recompensa→inversión, más taxonomía operativa de dark patterns con señales de código por patrón. Tres skills de invocación explícita: /ui-judge audita screenshot/URL/código con hallazgos anclados a evidencia concreta (elemento/cita/archivo:línea — nunca heurísticas genéricas), score por familia con veto ético, y sección obligatoria de límites del input; /ux-design propone flujos declarando qué principio usa cada decisión y por qué sirve al usuario, con guardas éticas y salida simétrica a la entrada; /dark-pattern-scan escanea flujos completos pre-ship (suscripción, checkout, consentimiento) midiendo asimetría de fricción entrada/salida, con reporte pasa/falla, banderas regulatorias (FTC click-to-cancel, DSA) e integración opcional con /code-review. Complementa (no solapa) skills de diseño visual tipo ui-ux-pro-max: esto cubre cómo se comporta la interfaz y su ética, no cómo se ve.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/interface-lens",
-      "category": "design"
-    },
-    {
-      "name": "memory-flow",
-      "description": "Barrido batch de memoria: /revisar_memoria clasifica memorias del formato por-archivo (VIGENTE/STALE/GRADUABLE/OBSOLETA/FUSIONABLE) y propone graduaciones a CLAUDE.md/CONTEXT.md. Solo reporta; aplica con OK explícito. Complemento del flujo orgánico (graduar/corregir al tocar) — v2 elimina /actualizar_memoria y el agente auditor.",
-      "version": "2.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/memory-flow",
-      "category": "productivity"
-    },
-    {
-      "name": "review-flow",
-      "description": "Checkpoint pre-ejecución: /analizar verifica la comprensión antes de tocar nada, pensado para dictados por voz e instrucciones ambiguas donde una confusión fonética ES/EN cambia el trabajo.",
-      "version": "2.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/review-flow",
-      "category": "productivity"
-    },
-    {
       "name": "host-orchestrator",
       "description": "v4.1.0: control de effort por rol y por issue (`role_efforts` → `args.efforts`, `args.issueEfforts`) + tres recortes de costo derivados de la autopsia de 4 corridas reales (2026-07-27) que midió tokens por rol en los transcripts de agentes: el costo escala con turnos × contexto acumulado, NO con el effort (output por corrida 187k-457k vs cache read 47M-215M; apagar todo el razonamiento de los 13 reviewers ahorraría ~6%). (a) APPLIER POR TANDAS (§3.7c, `applier_chunk`, default 4): el applier único de la corrida prd0019-0722 corrió 491 turnos con el contexto creciendo de 44k a 462k → 115M de tokens leídos, 39% de esa corrida en UN agente; ahora la tanda 1 crea el worktree aislado y las siguientes hacen cd con contexto fresco, acumulando aplicadas/falladas (tanda muerta → sus fixes van a `humano`). (b) DIFF PRE-FILTRADO POR UNIDAD (§3.7b): cada reviewer hace `git diff -- <paths de su unidad>` en vez del diff integrado completo (fallback '.'), sin tocar cobertura. (c) DISCIPLINA DE CONTEXTO en implementer y applier: reporters silenciosos, tests del área mientras se itera, no releer archivos ya leídos, leer rangos (un implementer de 269 turnos costó 79M, más que los 13 reviewers juntos). Defaults de effort: scout/validator/serializer low, implementer/applier medium, resolver/particionador/reviewer/judge high — la fleet NO se recorta para ahorrar: el gate es puramente numérico y el judge no recupera falsos negativos. Host-side orchestration of the full AFK pipeline. v4.0.0 (BREAKING): the pipeline engine is now a deterministic Workflow script (`workflows/prd-pipeline.js`, launched by the new `/prd-pipeline` command) — rules run as JS code, agents only implement/measure/resolve. Gate = pure `if` over validator numbers (generic ratchet: no metric worsens vs wave baseline, no before-green test goes red, diff must touch tests; invalid measurement is NEVER success). Integration-branch policy: creates `prd/<milestone>` (or `batch/<slug>`), issue PRs target it, base merged in before each wave, run ends with ONE draft PR to base for Leo's green button. All remote mutations serialized through idempotent check-then-act serializer agents (work-identity keyed, audit-logged). Capability tiers T0-T3 instead of model names (mapping only in repo config `model_map`); the launching session is the T0 orchestrator and pins each node's tier at design time. Native review fleet phase (partition → reviewers → judge → applier → gate). Resume via Workflow journal: `resumeFromRunId` only if nothing changed by hand, fresh run always safe. Spec: docs/SPEC-v4-workflow-engine.md (grilled 2026-07-16, validated by Piloto 1 ratchet-TS 2026-07-17: 6/6 criteria, 3 resumes without duplicated mutations). REMOVED in v4.0.0: `/afk-pipeline`, `/goal` wrapping, state.json, PROGRESS.md, cc-afk env-var scaffolding (only Bash/API timeouts survive). Kept as standalone surgical tools: `/parallel-implement-wave` (2-6 issues, parallel worktree subagents) and `/merge-orchestrate` (2-7 PRs, serial intent-aware merge). Custom subagents: `parallel-implementer` (TDD vertical-slice discipline, never pushes) and `merge-resolver` (5 no-regression criteria, recommends — serializer executes). Explicit invocation only; the Workflow tool's own opt-in gate doubles the marketplace rule.",
       "version": "4.1.0",
@@ -46,16 +16,6 @@
       },
       "source": "./plugins/host-orchestrator",
       "category": "engineering"
-    },
-    {
-      "name": "yt-transcript",
-      "description": "Transcript de videos de YouTube a un archivo central (default ~/Documents/Transcripts, configurable con YT_TRANSCRIPTS_DIR). El comando /yt-transcript corre scripts/ytt.sh y después escribe un summary.md en español con timestamps anclados. Cascada de dos vías: (1) captions oficiales/automáticas vía yt-dlp en formato json3 —la que funciona—, y (2) fallback a Whisper local (faster-whisper large-v3, env mamba video-to-knowledge) cuando el video no tiene subtítulos; --whisper fuerza la vía 2. Por video guarda transcript.txt, transcript_timestamped.txt, transcript.srt, audio.mp3 y meta.json en una carpeta <fecha>__<canal>__<titulo>__<id>, más un INDEX.md central regenerado desde los meta.json (nunca append: borrar una carpeta a mano se refleja solo; 📝 marca las entradas con resumen). Idempotente —re-invocar un video ya extraído solo refresca el índice—, con --force para re-extraer. Robustez derivada de fallos reales medidos: yt() reintenta con --cookies-from-browser cuando YouTube responde 429 o 'Sign in to confirm you're not a bot'; se prefiere el yt-dlp de Homebrew porque trae Deno para resolver el n-challenge (el instalado por pip falla); Safari no sirve como fuente de cookies porque SIP bloquea Cookies.binarycookies. Flags: --no-audio, --force, --whisper, --lang xx, y --no-summary (del comando). Invocación explícita del usuario.",
-      "version": "1.0.0",
-      "author": {
-        "name": "Leopoldo Bini"
-      },
-      "source": "./plugins/yt-transcript",
-      "category": "productivity"
     }
   ]
 }
