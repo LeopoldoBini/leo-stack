@@ -2,13 +2,15 @@
 
 Orquestación host-side del pipeline AFK completo. **v4: el motor es un Workflow script determinístico** — las reglas corren como código JS (loops, condiciones, gates numéricos); los agentes solo implementan, miden y resuelven.
 
-Un solo punto de entrada: **`/prd-pipeline`** (invocación explícita de Leo, nunca del modelo).
+Punto de entrada: **`/prd-pipeline`** (invocación explícita de Leo, nunca del modelo).
 
 ```
 /prd-pipeline milestone:PRD-0016          # sin tope (default)
 /prd-pipeline label:slice/checkout +500k  # +Nk = hard cap deliberado
 /prd-pipeline "#42,#43,#44" --dry-run     # plan + args, sin lanzar
 ```
+
+Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de operación en `CLAUDE.md` (regla HITL + puntero `cc-afk`) y el `.host-orchestrator/config.json`. Una vez por repo, idempotente.
 
 ## Fuentes de verdad (sin duplicación acá)
 
@@ -17,6 +19,7 @@ Un solo punto de entrada: **`/prd-pipeline`** (invocación explícita de Leo, nu
 | La spec del motor: arquitectura, roles/tiers, gate ratchet, serializers, resume, review fleet | `docs/SPEC-v4-workflow-engine.md` |
 | El motor ejecutable | `workflows/prd-pipeline.js` |
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
+| Qué se siembra al adoptar el plugin en un repo | `commands/init.md` |
 | Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md` |
 | Contrato por repo (opcional, con defaults) | `.host-orchestrator/config.json` — spec §3.10 |
 | Historial de versiones | `docs/CHANGELOG.md` |
@@ -33,7 +36,8 @@ host-orchestrator/
 ├── workflows/
 │   └── prd-pipeline.js                    # EL MOTOR v4
 ├── commands/
-│   └── prd-pipeline.md                    # /prd-pipeline (único comando)
+│   ├── prd-pipeline.md                    # /prd-pipeline — lanza el motor
+│   └── init.md                            # /init — onboarding del repo
 └── agents/
     ├── parallel-implementer.md            # TDD vertical slice; nunca pushea
     └── merge-resolver.md                  # 5 criterios de no-regresión; recomienda

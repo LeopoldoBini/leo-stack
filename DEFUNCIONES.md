@@ -33,7 +33,7 @@ Redirects pieza por pieza:
 | `/prototype` | `mattpocock-skills:prototype` |
 | `/grill-with-docs` | `mattpocock-skills:grilling` + `mattpocock-skills:domain-modeling` |
 | `/context-bootstrap` | `mattpocock-skills:domain-modeling` — el primitivo pasó a upstream: crea `CONTEXT.md` lazy con su propio `CONTEXT-FORMAT.md`; el minado batch muere con el mercado agotado (los 15 `CONTEXT.md` ya existen). Decidido en [#22](https://github.com/LeopoldoBini/leo-stack/issues/22) |
-| `/init-workflow` | `host-orchestrator` — el bloque pipeline muere (existía en 3 de 15 repos, los 3 podridos); renace mínimo como comando de onboarding (línea HITL de [#10](https://github.com/LeopoldoBini/leo-stack/issues/10) §8 + `config.json` + puntero `cc-afk`), nace en [#23](https://github.com/LeopoldoBini/leo-stack/issues/23). Decidido en [#22](https://github.com/LeopoldoBini/leo-stack/issues/22) |
+| `/init-workflow` | **`/host-orchestrator:init`** (4.3.0) — el bloque pipeline de siete pasos muere (existía en 3 de 15 repos, los 3 podridos); renació mínimo: línea HITL de [#10](https://github.com/LeopoldoBini/leo-stack/issues/10) §8 + `config.json` + puntero `cc-afk`. El comando nuevo **remueve el bloque viejo** del `CLAUDE.md` al correrse. Decidido en [#22](https://github.com/LeopoldoBini/leo-stack/issues/22), nacido en [#23](https://github.com/LeopoldoBini/leo-stack/issues/23) |
 | `/agent-brief` | **sin reemplazo** — el `## Agent Brief` era duplicación del spec padre y sale del pipeline por [Sinergia pipeline](https://github.com/LeopoldoBini/leo-stack/issues/10) §1; el body del ticket es el contrato |
 | `/zoom-out` | **sin reemplazo** — upstream lo borró por desuso |
 | `/review-fleet` | `host-orchestrator` v4 (ya portado al motor); se pierde el modo interactivo report-only |

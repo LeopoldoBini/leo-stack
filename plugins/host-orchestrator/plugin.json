@@ -1,7 +1,7 @@
 {
   "name": "host-orchestrator",
-  "version": "4.2.0",
-  "description": "Motor v4 del pipeline AFK: /prd-pipeline lanza un Workflow determinístico que implementa y mergea issues por waves sobre una rama integradora, con gate numérico, review fleet nativa y PR final draft. Spec: docs/SPEC-v4-workflow-engine.md; historial: docs/CHANGELOG.md.",
+  "version": "4.3.0",
+  "description": "Motor v4 del pipeline AFK: /prd-pipeline lanza un Workflow determinístico que implementa y mergea issues por waves sobre una rama integradora, con gate numérico, review fleet nativa y PR final draft; /init onboarda el repo. Spec: docs/SPEC-v4-workflow-engine.md; historial: docs/CHANGELOG.md.",
   "author": {
     "name": "Leopoldo Bini",
     "email": "raul.leopoldobini@gmail.com"

@@ -2,6 +2,12 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.3.0 (2026-08-04)
+
+Comando nuevo **`/init`** — onboarding de un repo al pipeline AFK, nacido a estándar (leo-stack #23). Es lo que sobrevive de `/init-workflow` del retirado `engineering-workflow`: el bloque de pipeline de siete pasos muere (existía en 3 de 15 repos, los 3 podridos; el orden canónico lo publica `mattpocock-skills` con `/setup-matt-pocock-skills`) y queda la pieza que ningún cómputo suple — **la regla HITL**: al aprobar el breakdown de `/to-tickets`, los slices que necesiten humano bajan a `ready-for-human`, porque el motor despacha solo lo que lleva `ready-for-agent` (leo-stack #10 §8).
+
+Siembra dos artefactos y nada más: un bloque idempotente en `CLAUDE.md` con marcadores propios (`<!-- host-orchestrator:start -->`) que además remueve el bloque huérfano de `engineering-workflow` si lo encuentra, y `.host-orchestrator/config.json` con lo que el comando constata del repo — `base_branch` y `validate_hook`. Los defaults del motor (`model_map`, `role_tiers`, `role_efforts`, `labels`, `test_globs`, `applier_chunk`, `deny_paths`) **no se copian**: cada clave se agrega el día que el repo quiere apartarse, porque congelarlas en 39 repos es la misma verdad en 40 lugares.
+
 ## 4.2.0 (2026-08-04)
 
 Retiro de los dos comandos standalone `/parallel-implement-wave` y `/merge-orchestrate` (971 de las ~1.070 líneas de comandos): el motor v4 nunca los invocó y sus gates evaluaban contra infra borrada en v4.0.0. Reemplazo y rescate: `DEFUNCIONES.md` del marketplace, tag `rescate/comandos-standalone`. Además, el plugin entero pasa al estándar de calidad (leo-stack #9/#21): descriptions ≤ 40 palabras, `disable-model-invocation: true` en `/prd-pipeline` (reemplaza el gate en prosa), README reducido a portada, sediment de la spec corregido (§4 tabla de migración, §6.5 presupuesto), constraints del `parallel-implementer` reformulados en positivo.
