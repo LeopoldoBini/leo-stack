@@ -16,7 +16,7 @@ Registro de lo que se retiró de `leo-stack` y con qué se reemplaza.
 
 Decidido en [Veredicto por plugin](https://github.com/LeopoldoBini/leo-stack/issues/6), con la mecánica de [Mecánica de deprecación sin ruptura](https://github.com/LeopoldoBini/leo-stack/issues/7). Ejecutado en [Retirar los 6 plugins que mueren y partir review-flow](https://github.com/LeopoldoBini/leo-stack/issues/19).
 
-### `engineering-workflow` 2.9.0 → `mattpocock-skills` + plugin-pegamento
+### `engineering-workflow` 2.9.0 → `mattpocock-skills` + `host-orchestrator`
 
 Fork de la suite de Matt que quedó superado: la auditoría [fork vs upstream](https://github.com/LeopoldoBini/leo-stack/issues/3) midió 8 de 16 piezas ya cubiertas por upstream 1.2.0, con la suite reestructurada entera (sync selectivo inviable).
 
@@ -32,8 +32,8 @@ Redirects pieza por pieza:
 | `/deep-modules` | `mattpocock-skills:codebase-design` |
 | `/prototype` | `mattpocock-skills:prototype` |
 | `/grill-with-docs` | `mattpocock-skills:grilling` + `mattpocock-skills:domain-modeling` |
-| `/context-bootstrap` | plugin-pegamento (nace en [#23](https://github.com/LeopoldoBini/leo-stack/issues/23)) |
-| `/init-workflow` | plugin-pegamento (nace en [#23](https://github.com/LeopoldoBini/leo-stack/issues/23)) |
+| `/context-bootstrap` | `mattpocock-skills:domain-modeling` — el primitivo pasó a upstream: crea `CONTEXT.md` lazy con su propio `CONTEXT-FORMAT.md`; el minado batch muere con el mercado agotado (los 15 `CONTEXT.md` ya existen). Decidido en [#22](https://github.com/LeopoldoBini/leo-stack/issues/22) |
+| `/init-workflow` | `host-orchestrator` — el bloque pipeline muere (existía en 3 de 15 repos, los 3 podridos); renace mínimo como comando de onboarding (línea HITL de [#10](https://github.com/LeopoldoBini/leo-stack/issues/10) §8 + `config.json` + puntero `cc-afk`), nace en [#23](https://github.com/LeopoldoBini/leo-stack/issues/23). Decidido en [#22](https://github.com/LeopoldoBini/leo-stack/issues/22) |
 | `/agent-brief` | **sin reemplazo** — el `## Agent Brief` era duplicación del spec padre y sale del pipeline por [Sinergia pipeline](https://github.com/LeopoldoBini/leo-stack/issues/10) §1; el body del ticket es el contrato |
 | `/zoom-out` | **sin reemplazo** — upstream lo borró por desuso |
 | `/review-fleet` | `host-orchestrator` v4 (ya portado al motor); se pierde el modo interactivo report-only |
