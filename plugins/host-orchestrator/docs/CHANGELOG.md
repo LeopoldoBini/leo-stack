@@ -2,6 +2,14 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.4.1 (2026-08-07)
+
+Tres bugs cazados en la corrida real 16-17-0806 (cuenta-norte, primera con `all_done` por scopeInicial):
+
+- **`pipeline-read.sh`: un `gh` caído dentro de un `pipe|while` se tragaba el error** — `muere` mataba solo al subshell y el scope seguía vacío con exit 0; el motor leía "0 issues" y frenaba BLOCKED sin causa visible. La lista explícita y el loop de PRs abiertos pasan a `for` en el shell principal (fail-loud), y un token no numérico en la lista muere con mensaje claro.
+- **Motor: `args.scope` como string rompía el scout.** `SCOPE_ARG` asumía `{type, value}` y con el string literal del comando quedaba `"undefined:undefined"` (que el CLI convertía en el "0 issues" de arriba — los dos bugs encadenados). Ahora acepta ambas formas.
+- **Motor: `all_done` en la wave 1 salteaba la captura de baseline** y el gate de los fixes de la review reventaba con `baseMetrics` null. La review recaptura baseline sobre la integradora si falta. De paso: `denyPaths`/`requiredChecks` en null ya no revientan (`??= []`).
+
 ## 4.4.0 (2026-08-04)
 
 **El pipeline deja de tener contrato propio: consume los artefactos de la suite de Matt tal como salen** (leo-stack #10, ejecutado en #24). Detalle de cada mecanismo en la spec §3.13.

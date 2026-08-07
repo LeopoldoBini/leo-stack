@@ -157,9 +157,15 @@ traer_issues() {
       ;;
     *)
       # Lista explícita: "#42,#43" o "42,43". El scope llega literal del comando.
-      # El \n final no es cosmético: sin él, `read` descarta el último número.
-      printf '%s\n' "$1" | tr -d '# ' | tr ',' '\n' | while IFS= read -r n; do
+      # `for` en el shell principal, NUNCA pipe|while: en el subshell del pipe un
+      # `muere` (gh caído, 404) mata solo al subshell y el scope sigue vacío con
+      # exit 0 — el motor leyó "0 issues" y frenó BLOCKED sin causa visible
+      # (corrida 16-17-0806, dos veces).
+      for n in $(printf '%s\n' "$1" | tr -d '# ' | tr ',' ' '); do
         [ -n "$n" ] || continue
+        case "$n" in
+          *[!0-9]*) muere "scope de lista con token no numérico: \"$n\" (¿scope mal compuesto?)" ;;
+        esac
         consulta "issue-$n" api --method GET "repos/$SLUG/issues/$n" --jq "$CAMPOS_ISSUE"
       done > "$TMP/issues"
       ;;
@@ -175,8 +181,9 @@ traer_prs() {
     --paginate --jq ".[] | $CAMPOS_PR" > "$TMP/prs"
 
   # mergeable y checks solo de los PRs ABIERTOS: son pocos (≤ max_parallel) y es
-  # lo único que la lista de PRs no trae ya computado.
-  awk -F'\t' '$2 == "open" { print $1 }' "$TMP/prs" | while IFS= read -r p; do
+  # lo único que la lista de PRs no trae ya computado. `for`, no pipe|while: un
+  # `muere` en subshell se traga el error (misma trampa que la lista explícita).
+  for p in $(awk -F'\t' '$2 == "open" { print $1 }' "$TMP/prs"); do
     est="$(consulta "pr-$p" pr view "$p" --repo "$SLUG" --json mergeable,statusCheckRollup \
              --jq '[ (.mergeable // "UNKNOWN"),
                      ([.statusCheckRollup[]? | select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED" or .state == "FAILURE" or .state == "ERROR")] | length | tostring) ] | @tsv')"

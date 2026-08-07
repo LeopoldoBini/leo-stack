@@ -67,6 +67,10 @@ function parseArgs(a) {
   throw new Error(`prd-pipeline: args ausente o de tipo no soportado (${typeof a}). Componé el objeto args (ver commands/prd-pipeline.md).`)
 }
 const A = parseArgs(args)
+// Args opcionales que el motor recorre sin re-chequear: null → default vacío
+// (corrida 16-17-0806: `A.denyPaths.length` con null reventó a mitad de wave).
+A.denyPaths ??= []
+A.requiredChecks ??= []
 
 const M = A.models
 const T = A.tiers
@@ -105,7 +109,15 @@ const restante = () => (BUDGET_TOTAL ? Math.max(0, BUDGET_TOTAL - budget.spent()
 // §3.4b — el scope viaja literal al CLI de lectura, que es el único lugar donde
 // vive la tabla de bucketing. Acá no se traduce a flags de gh: dos traducciones
 // del mismo scope divergen sin que nadie se entere.
-const SCOPE_ARG = A.scope.type === 'list' ? A.scope.value : `${A.scope.type}:${A.scope.value}`
+// Acepta el string literal del comando ('#16,#17' | 'milestone:X') o el objeto
+// {type, value}. Con string, `.type` era undefined y SCOPE_ARG quedaba
+// "undefined:undefined" — el CLI devolvía scope vacío y la corrida moría BLOCKED.
+const SCOPE_ARG =
+  typeof A.scope === 'string'
+    ? A.scope
+    : A.scope.type === 'list'
+      ? A.scope.value
+      : `${A.scope.type}:${A.scope.value}`
 
 // Sin el CLI no hay bucketing, y un `sh undefined` daría issues vacío que el
 // motor leería como "nada accionable" — un scope entero salteado en silencio.
@@ -925,7 +937,19 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de EST
         }
         if (apl && apl.aplicadas > 0) {
           const medRev = await medir(apl.worktree, 'Review', 'review-fixes', { conDiff: false })
-          const gRev = gate(medRev, baseMetrics, { exigirTests: false })
+          // all_done en la wave 1 hace break antes de capturar baseline y la review
+          // llega con baseMetrics null (corrida 16-17-0806) — recapturar acá.
+          if (!baseMetrics) {
+            const baseRev = await medir(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true })
+            if (baseRev?.status === 'ok')
+              baseMetrics = {
+                metrics: baseRev.metrics,
+                tests_failed: baseRev.tests_failed,
+                failing_test_files: baseRev.failing_test_files,
+              }
+            else log(`⚠ baseline-review inválido (${baseRev?.error ?? 'validator murió'}) — gate de fixes solo con tests`)
+          }
+          const gRev = gate(medRev, baseMetrics ?? { metrics: {}, tests_failed: 0, failing_test_files: [] }, { exigirTests: false })
           if (gRev.pass) {
             const pubRev = await serializar(
               `Publicar y mergear los fixes del review (worktree ${apl.worktree}, branch ${apl.branch}):
