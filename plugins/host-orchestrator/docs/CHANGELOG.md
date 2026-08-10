@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.5.0 (2026-08-10)
+
+**Bloqueante saldado en la integradora** (leo-stack #26, expuesto por la corrida `ready-for-agent-0809` de omega-radar): un bloqueante del scope con PR mergeado a la rama integradora se descuenta del gate de dependencias aunque GitHub lo siga contando abierto — su código ya está en la base desde la que branchea el dependiente, y la issue recién cierra con el PR final a la default branch. Sin el descuento, un scope en cadena A←B←C avanzaba un eslabón por corrida y por botón verde. Bloqueantes fuera del scope siguen rigiéndose por el grafo tal cual. Fixture `cadena` en el test. Spec §3.13.
+
 ## 4.4.1 (2026-08-07)
 
 Tres bugs cazados en la corrida real 16-17-0806 (cuenta-norte, primera con `all_done` por scopeInicial):

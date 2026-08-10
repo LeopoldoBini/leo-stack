@@ -250,6 +250,21 @@ cmd_scope() {
     if ($6 != "") esPadre[$6] = 1
   }
   END {
+    # Bloqueante saldado en la integradora: una issue con PR mergeado a la rama
+    # ya aportó su código a la base desde la que branchean sus dependientes, así
+    # que como bloqueante está satisfecha aunque GitHub la siga contando abierta
+    # (recién cierra cuando el PR final mergea a la default branch). Sin este
+    # descuento, una cadena A←B←C avanza un eslabón por corrida (leo-stack #26).
+    # Solo aplica a bloqueantes DENTRO del scope: de las de afuera no sabemos
+    # nada y siguen rigiéndose por el grafo tal cual.
+    for (i = 1; i <= cant; i++) {
+      n = num[i]
+      for (j = 1; j <= np; j++) {
+        p = orden[j]
+        if ((p "|" n) in liga && pmerged[p]) { hecho[n] = 1; break }
+      }
+    }
+
     for (i = 1; i <= cant; i++) {
       n = num[i]
       prMerged = 0; prAbierto = 0; prNum = ""; prBranch = ""; prLabels = ""
@@ -260,6 +275,19 @@ cmd_scope() {
         else if (pestado[p] == "open") { prAbierto = 1; prNum = p; prBranch = phead[p]; prLabels = plabels[p] }
       }
       rojo = (pmergeable[prNum] == "CONFLICTING") || (pfail[prNum] > 0) || tiene(prLabels, "merge-blocked")
+
+      # vivos = bloqueantes que bloquean de verdad; hechos = los descontados por
+      # PR mergeado a la rama. Sin lista de deps (no debería pasar con bloq > 0),
+      # manda el contador del summary: conservador, nunca despacha de más.
+      vivos = bloq[i]; hechos = 0
+      if (bloq[i] > 0 && deps[n] != "") {
+        vivos = 0
+        nd = split(deps[n], darr, ",")
+        for (k = 1; k <= nd; k++) {
+          if (darr[k] == "") continue
+          if (darr[k] in hecho) hechos++; else vivos++
+        }
+      }
 
       if (prMerged) {
         b = "DONE"; d = "PR #" prNum " mergeado a " rama
@@ -276,10 +304,14 @@ cmd_scope() {
         d = "PR #" prNum " abierto pero " (tiene(prLabels, "merge-blocked") ? "con label merge-blocked" \
             : (pmergeable[prNum] == "CONFLICTING" ? "en conflicto" \
             : (pfail[prNum] > 0 ? pfail[prNum] " check(s) en rojo" : "sin label " lpr)))
-      } else if (bloq[i] > 0) {
-        b = "BLOCKED_BY_DEP"; d = bloq[i] " bloqueante(s) abierto(s) en el grafo nativo"
+      } else if (vivos > 0) {
+        b = "BLOCKED_BY_DEP"
+        d = vivos " bloqueante(s) abierto(s) en el grafo nativo"
+        if (hechos > 0) d = d " (" hechos " ya mergeado(s) a " rama ", descontado(s))"
       } else if (tiene(labels[i], lready) || tiene(labels[i], "state/" lready)) {
-        b = "IMPLEMENTABLE"; d = "label " lready ", sin PR, sin bloqueantes abiertos"
+        b = "IMPLEMENTABLE"
+        d = "label " lready ", sin PR, " \
+            (hechos > 0 ? "bloqueantes ya mergeados a " rama : "sin bloqueantes abiertos")
       } else if (estado[i] == "closed") {
         b = "HUMAN_GATED"; d = "issue cerrada sin PR mergeado hacia " rama " — el pipeline no la toca"
       } else {

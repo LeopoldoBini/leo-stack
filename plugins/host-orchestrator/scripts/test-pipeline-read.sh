@@ -75,6 +75,20 @@ bucket 106 IMPLEMENTABLE
 bucket 107 IMPLEMENTABLE
 espera '(3 issues' 'la lista no pierde issues por el camino'
 
+# Una cadena A←B←C avanzaba un eslabón por corrida (leo-stack #26): el summary
+# de GitHub cuenta abierto a un bloqueante cuyo PR ya mergeó a la integradora,
+# porque la issue recién cierra con el PR final a la default branch. El descuento
+# aplica solo a bloqueantes DEL scope; los de afuera siguen bloqueando.
+printf '\nscope en cadena: bloqueante con PR mergeado a la integradora\n'
+HO_FIXTURE_DIR="$FIX/cadena" sh "$CLI" scope '#110,#111,#112,#113' --rama prd/x > "$SALIDA" 2>&1
+bucket 110 DONE
+bucket 111 IMPLEMENTABLE
+bucket 112 BLOCKED_BY_DEP
+bucket 113 BLOCKED_BY_DEP
+espera 'bloqueantes ya mergeados a prd/x'      'el detalle dice por qué #111 quedó libre'
+espera '1 ya mergeado(s) a prd/x, descontado(s)' 'el detalle de #113 descuenta el hecho y conserva el vivo'
+espera '"all_done": false'                     'all_done falso: la cadena destrabada sigue siendo trabajo'
+
 printf '\nscope con el trabajo terminado\n'
 HO_FIXTURE_DIR="$FIX/completo" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 > "$SALIDA" 2>&1
 espera '"all_done": true' 'all_done verdadero: todo DONE y al menos una DONE'
