@@ -103,17 +103,24 @@ seccion_allowlist paths     | sort -u > "$TMP/paths"
 find "$REPO/plugins" -name '*.md' -type f | sort > "$TMP/md"
 find "$REPO/plugins" -name plugin.json -type f | sort > "$TMP/plugin-json"
 
-# Universo de comandos vivos: los .md de commands/ de todos los plugins del repo,
-# con y sin namespace. Ese es "el índice" contra el que #9 manda contrastar.
+# Universo de invocables vivos: los comandos y las skills de todos los plugins del
+# repo, con y sin namespace. Una skill se invoca con la misma barra que un comando
+# (`/glow-up`), así que nombrarla es una referencia viva, no sediment. Ese es "el
+# índice" contra el que #9 manda contrastar.
 : > "$TMP/comandos"
 while IFS= read -r f; do
   case "$f" in
     */commands/*)
       base="$(basename "$f" .md)"
       plugin="$(printf '%s' "$f" | sed -E 's#.*/plugins/([^/]+)/commands/.*#\1#')"
-      printf '%s\n%s:%s\n' "$base" "$plugin" "$base" >> "$TMP/comandos"
       ;;
+    */skills/*/SKILL.md)
+      base="$(basename "$(dirname "$f")")"
+      plugin="$(printf '%s' "$f" | sed -E 's#.*/plugins/([^/]+)/skills/.*#\1#')"
+      ;;
+    *) continue ;;
   esac
+  printf '%s\n%s:%s\n' "$base" "$plugin" "$base" >> "$TMP/comandos"
 done < "$TMP/md"
 sort -u -o "$TMP/comandos" "$TMP/comandos"
 
