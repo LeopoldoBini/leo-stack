@@ -16,7 +16,8 @@ Compone `args` y lanza **`Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflow
 
 - **Scope** (requerido, posicional): `milestone:<name>` | `label:<label>` | `parent:#N` | `#42,#43,...`
 - **`+<N>k` / `+<N>m`** (opcional): hard cap de tokens de la corrida — va al `args.budgetTotal` (fuente primaria; la directiva del turno es solo fallback, demostró ser frágil). **Sin `+Nk`, la corrida va SIN tope** (default desde v4.0.8) — pasalo solo cuando quieras limitarla deliberadamente.
-- **`--max-waves=N`** (default 8), **`--max-parallel=N`** (default 6, techo 8), **`--dry-run`** (mostrar plan + args sin lanzar).
+- **`--max-waves=N`** (default 8) — **piso: `2 × eslabones_seriales + 2`**. Un eslabón de la cadena de dependencias cuesta DOS waves (implementar + mergear), y la profundidad de la cadena sale de los `blocked_by` de la salida de `scope`: 5 eslabones necesitan 12, no 8. Quedarse corto cuesta una corrida entera de trabajo re-lanzada con `resumeFromRunId`.
+- **`--max-parallel=N`** (default 6, techo 8), **`--dry-run`** (mostrar plan + args sin lanzar).
 
 ## Pasos (vos, la sesión T0)
 
@@ -32,9 +33,14 @@ date -Iseconds                                            # ts para args (el scr
 sh "${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh" check '<scope>'
 ```
 
-El `check` es el gate de entrada: verifica `gh auth`, que el scope resuelva, que los labels existan y que ninguna issue declare `Blocked by #N` en prosa sin edge nativo en el grafo — el motor lee el grafo y no tiene fallback textual, así que esa dependencia invisible despacharía trabajo bloqueado. Cuando falla, imprime los `gh api …/dependencies/blocked_by` exactos que lo arreglan.
+El `check` es el gate de entrada: verifica `gh auth`, que el scope resuelva, que los labels existan y que toda dependencia declarada en el body tenga su edge nativo en el grafo — inline (`Blocked by: #N`) o en la sección `### Blocked by` con bullets, que es la que emite `to-tickets`. El motor lee el grafo y no tiene fallback textual: una dependencia que sólo vive en el body despacha la cadena entera en paralelo, cada capa contra piezas que no existen.
 
-Sale distinto de 0 → reportar BLOCKED con su salida y frenar. **No lanzar nada**: todavía no se creó ninguna rama.
+Según qué falle:
+
+- **Edges faltantes** → el check imprime los `gh api …/dependencies/blocked_by` exactos. En corrida AFK autorizada los **ejecutás vos** —crear un edge es metadata reversible y el comando viene escrito— y lo anotás en el resumen para Leo. Supervisado: se los mostrás y esperás. Después volvés a correr el `check` hasta verde.
+- **Cualquier otra falla** (auth, scope vacío, labels) → reportar BLOCKED con la salida y frenar.
+
+**Nada se lanza hasta el verde**: todavía no se creó ninguna rama.
 
 ### 2 — Componer `args`
 
@@ -85,7 +91,7 @@ Crash/kill → **`resumeFromRunId` SOLO si nada cambió a mano desde el corte** 
 - No crea issues (eso es `mattpocock-skills:to-tickets`, invocado por Leo).
 - No mergea la rama integradora a la base: el PR final queda **draft** para el botón verde de Leo.
 - No re-decide tiers en runtime: el tiering se pinnea al lanzar (idem efforts).
-- No escribe en GitHub desde el pre-flight: `pipeline-read.sh` es solo lectura. Los edges de dependencia que el `check` reclama los crea Leo, con los comandos que el propio check imprime.
+- No escribe en GitHub desde el pre-flight: `pipeline-read.sh` es solo lectura. Los edges que el `check` reclama los ejecuta el T0 con los comandos que el check imprime (paso 1), nunca el CLI.
 - No recorta la review fleet para ahorrar: el número de unidades y las 2 lentes + integración son cobertura, no lujo. El ahorro sale de pre-filtrar el diff por unidad (§3.7b) y de trocear al applier (§3.7c), no de mirar menos.
 
 ## Contrato por repo (opcional, `.host-orchestrator/config.json`)

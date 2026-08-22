@@ -89,9 +89,18 @@ espera 'bloqueantes ya mergeados a prd/x'      'el detalle dice por qué #111 qu
 espera '1 ya mergeado(s) a prd/x, descontado(s)' 'el detalle de #113 descuenta el hecho y conserva el vivo'
 espera '"all_done": false'                     'all_done falso: la cadena destrabada sigue siendo trabajo'
 
-printf '\nscope con el trabajo terminado\n'
+printf '\nscope con el trabajo terminado (y milestone resuelto por prefijo)\n'
+# El título real del milestone es "PRD-0016 — Checkout end-to-end" y el scope se
+# escribe con el código pelado: sin matcheo por prefijo, esto moría en el pre-flight.
 HO_FIXTURE_DIR="$FIX/completo" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 > "$SALIDA" 2>&1
 espera '"all_done": true' 'all_done verdadero: todo DONE y al menos una DONE'
+espera 'resuelto por prefijo' 'avisa por stderr que resolvió el milestone por prefijo'
+
+printf '\nscope con un prefijo de milestone ambiguo\n'
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-001 --rama prd/x > "$SALIDA" 2>&1
+CODIGO=$?
+[ "$CODIGO" -eq 2 ] && paso "sale 2: no elige uno en silencio" || fallo "salió $CODIGO, se esperaba 2"
+espera 'es ambiguo, 2 títulos empiezan igual' 'nombra los candidatos en vez de adivinar'
 
 # ------------------------------------------------ check: deps sin edge nativo --
 
@@ -100,11 +109,22 @@ HO_FIXTURE_DIR="$FIX/prosa" sh "$CLI" check 'label:ready-for-agent' > "$SALIDA" 
 CODIGO=$?
 [ "$CODIGO" -eq 1 ] && paso "sale 1: no se lanza el pipeline" || fallo "salió $CODIGO, se esperaba 1"
 
-espera 'dependencia(s) declarada(s) en prosa'  'nombra el problema'
+espera 'dependencia(s) declarada(s) en el body' 'nombra el problema'
 espera 'issues/301/dependencies/blocked_by -F issue_id=900099' 'imprime el remedio exacto para #99'
 espera 'issues/301/dependencies/blocked_by -F issue_id=900098' 'imprime el remedio exacto para #98'
 no_espera 'issues/302/dependencies'            '#302, que ya tiene edge nativo, no se reporta'
 espera 'label "afk-agent-pr" existe'           'chequea los labels que definen el scope'
+
+# El formato que emite to-tickets: heading + bullets. Era invisible para el check
+# y dio verde con el grafo VACÍO en la corrida prd-0030-0818 (7 issues en cadena).
+espera 'issues/303/dependencies/blocked_by -F issue_id=900594' 've el "### Blocked by" de un brief (#594)'
+espera 'issues/303/dependencies/blocked_by -F issue_id=900595' 've el segundo bullet de la sección (#595)'
+no_espera 'issue_id=<id-de-#2>'                'el "2" de "APIMarkeyV2" no es una referencia'
+no_espera 'issues/303/dependencies/blocked_by -F issue_id=900999' 'el heading siguiente cierra la sección: #999 queda afuera'
+
+# Contra el grafo REAL y no contra el contador: #304 tiene 1 edge y declara 2.
+espera 'issues/304/dependencies/blocked_by -F issue_id=900096' 'reporta el edge que falta de una issue ya bloqueada'
+no_espera 'issues/304/dependencies/blocked_by -F issue_id=900097' 'no repite el edge que #304 ya tiene'
 
 # ---------------------------------------------------- intent: índices, no cuerpos --
 

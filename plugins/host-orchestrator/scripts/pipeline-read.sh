@@ -139,10 +139,26 @@ traer_issues() {
   : > "$TMP/issues"
   case "$tipo" in
     milestone)
-      hito="$(consulta milestones api --method GET "repos/$SLUG/milestones" -f state=all -f per_page=100 \
-                --jq '.[] | [(.number|tostring), .title] | @tsv' \
-              | awk -F'\t' -v t="$valor" '$2 == t { print $1; exit }')"
-      [ -n "$hito" ] || muere "milestone \"$valor\" no existe en $SLUG"
+      # Título exacto primero; si no hay, PREFIJO. El scope se escribe con el
+      # código del PRD ("milestone:PRD-0030") y el título real del milestone suele
+      # llevar el nombre pegado ("PRD-0030 — Informe de …"): sin el prefijo, el
+      # scope no resolvía y la corrida moría en el pre-flight (prd-0030-0818).
+      # Dos títulos que empiezan igual = ambigüedad, y se muere diciéndolo: elegir
+      # uno por orden de la API sería silencioso y elegiría mal la mitad de las veces.
+      milestones="$(consulta milestones api --method GET "repos/$SLUG/milestones" -f state=all -f per_page=100 \
+                      --jq '.[] | [(.number|tostring), .title] | @tsv')"
+      hito="$(printf '%s\n' "$milestones" | awk -F'\t' -v t="$valor" '$2 == t { print $1; exit }')"
+      if [ -z "$hito" ]; then
+        cands="$(printf '%s\n' "$milestones" | awk -F'\t' -v t="$valor" 'index($2, t) == 1 { print }')"
+        ncands="$(printf '%s' "$cands" | grep -c . || true)"
+        case "$ncands" in
+          0) muere "milestone \"$valor\" no existe en $SLUG (ni exacto ni por prefijo)" ;;
+          1) hito="$(printf '%s' "$cands" | cut -f1)"
+             printf 'pipeline-read: milestone "%s" resuelto por prefijo → "%s"\n' \
+               "$valor" "$(printf '%s' "$cands" | cut -f2)" >&2 ;;
+          *) muere "milestone \"$valor\" es ambiguo, $ncands títulos empiezan igual: $(printf '%s' "$cands" | cut -f2 | tr '\n' '|')" ;;
+        esac
+      fi
       consulta issues api --method GET "repos/$SLUG/issues" -f state=all -f per_page=100 -f milestone="$hito" \
         --paginate --jq ".[] | select(has(\"pull_request\")|not) | $CAMPOS_ISSUE" > "$TMP/issues"
       ;;
@@ -385,23 +401,71 @@ cmd_check() {
     fi
   done
 
-  # Deps en prosa sin edge nativo (#10 §3): el motor no tiene fallback textual,
-  # así que un `Blocked by #N` que el grafo no conoce despacharía trabajo
-  # bloqueado. Falla ruidoso ANTES de crear ramas, con el remedio en la mano.
+  # Deps declaradas en el body sin edge nativo (#10 §3): el motor no tiene
+  # fallback textual, así que una dependencia que el grafo no conoce despacharía
+  # trabajo bloqueado. Falla ruidoso ANTES de crear ramas, con el remedio en la mano.
+  #
+  # Se leen los DOS formatos, porque los dos aparecen en briefs reales:
+  #   - inline:  "Blocked by: #99, #98"                     (repos heredados)
+  #   - sección: "### Blocked by" + bullets "- #594 (…)"    (lo que emite to-tickets)
+  # El formato sección era invisible para este check y dio verde con el grafo VACÍO
+  # en la corrida prd-0030-0818: 7 issues en cadena habrían salido en paralelo.
+  # Las referencias se extraen token por token (`#N`), NUNCA partiendo por
+  # no-dígitos: "- #594 (cliente APIMarkeyV2)" tiene un 2 que no es ninguna issue.
   awk -F'\t' '
-    $2 == "open" && $4 + 0 == 0 {
-      body = $8
-      while (match(body, /[Bb]locked[ -][Bb]y:?[ ]*#[0-9]+([ ]*,[ ]*#[0-9]+)*/)) {
-        frag = substr(body, RSTART, RLENGTH)
-        body = substr(body, RSTART + RLENGTH)
-        n = split(frag, partes, /[^0-9]+/)
-        for (i = 1; i <= n; i++) if (partes[i] != "") print $1 "\t" partes[i]
+    function refs(linea, hijo,   resto) {
+      resto = linea
+      while (match(resto, /#[0-9]+/)) {
+        print hijo "\t" substr(resto, RSTART + 1, RLENGTH - 1)
+        resto = substr(resto, RSTART + RLENGTH)
       }
-    }' "$TMP/issues" | sort -u > "$TMP/prosa"
+    }
+    $2 == "open" {
+      body = $8
+      resto = body
+      while (match(resto, /[Bb]locked[ -][Bb]y:?[ ]*#[0-9]+([ ]*,[ ]*#[0-9]+)*/)) {
+        # RSTART/RLENGTH son GLOBALES y refs() los pisa con su propio match():
+        # sin copiarlos antes, el cursor avanza con los de la última referencia
+        # y el loop no termina nunca.
+        ini = RSTART; largo = RLENGTH
+        refs(substr(resto, ini, largo), $1)
+        resto = substr(resto, ini + largo)
+      }
+      nl = split(body, lineas, /\\n/)
+      dentro = 0
+      for (i = 1; i <= nl; i++) {
+        l = lineas[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", l)
+        if (l ~ /^(#+[ ]*|\*\*)[Bb]locked[ -][Bb]y/) { dentro = 1; continue }
+        if (!dentro) continue
+        if (l ~ /^#+[ ]/)     { dentro = 0; continue }   # otro heading cierra la sección
+        if (l == "")          { continue }               # blanco entre heading y bullets
+        if (l !~ /^[-*+][ ]/) { dentro = 0; continue }   # prosa suelta cierra
+        refs(l, $1)
+      }
+    }' "$TMP/issues" | sort -u > "$TMP/declaradas"
+
+  # Contra el grafo REAL, no contra el contador: una issue con 1 edge nativo y 2
+  # dependencias declaradas ya no cuenta como "al día" (el contador `blocked_by`
+  # del summary la daba por chequeada y el segundo edge faltante pasaba igual).
+  # Las consultas van en un `for` ANTES del `while read`: `gh` lee stdin y dentro
+  # del loop se comería la lista de pares.
+  : > "$TMP/prosa"
+  if [ -s "$TMP/declaradas" ]; then
+    for h in $(cut -f1 "$TMP/declaradas" | sort -u); do
+      consulta "edges-$h" api --method GET "repos/$SLUG/issues/$h/dependencies/blocked_by" \
+        --jq '[.[].number] | join(",")' > "$TMP/edges-$h"
+    done
+    while IFS="$(printf '\t')" read -r hijo bloqueante; do
+      e="$(cat "$TMP/edges-$hijo" 2>/dev/null)"
+      case ",$e," in *",$bloqueante,"*) continue ;; esac
+      printf '%s\t%s\n' "$hijo" "$bloqueante"
+    done < "$TMP/declaradas" > "$TMP/prosa"
+  fi
 
   if [ -s "$TMP/prosa" ]; then
     n=$(wc -l < "$TMP/prosa" | tr -d ' ')
-    printf '  FALLA %s dependencia(s) declarada(s) en prosa sin edge nativo.\n' "$n"
+    printf '  FALLA %s dependencia(s) declarada(s) en el body sin edge nativo.\n' "$n"
     printf '        El motor lee el grafo, no el body: sin estos edges se despacha trabajo bloqueado.\n'
     printf '        Creálos y volvé a correr el check:\n'
     while IFS="$(printf '\t')" read -r hijo bloqueante; do
@@ -411,7 +475,7 @@ cmd_check() {
     done < "$TMP/prosa"
     fallas=$((fallas + 1))
   else
-    printf '  ok   ninguna dependencia en prosa huérfana del grafo nativo\n'
+    printf '  ok   toda dependencia declarada en el body tiene su edge nativo\n'
   fi
 
   printf '\n'

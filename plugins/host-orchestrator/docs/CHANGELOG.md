@@ -2,6 +2,20 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.6.0 (2026-08-22)
+
+Siete afinados de la corrida `prd-0030-0818` (App.SaltaCompra, 7 issues en cadena de 5 eslabones, PR #609). La corrida terminó DONE: esto es afinado, no rescate — y el `resumeFromRunId` que la destrabó repuso 74 agentes de caché sin re-trabajo.
+
+**El grave — el `check` era ciego al formato que emite `to-tickets`** (leo-stack #27). Los 7 briefs declaraban sus dependencias como sección `### Blocked by` + bullets, el grafo nativo estaba VACÍO y el check dio verde: sin la intervención manual del T0, el motor despachaba la cadena entera en paralelo, cada capa contra piezas inexistentes. Ahora lee los dos formatos —inline y sección—, extrae las referencias token por token (partir por no-dígitos convertía el `2` de `APIMarkeyV2` en una issue) y compara contra la **lista real de edges**, no contra el contador del summary, que daba por chequeada a una issue con un edge y dos dependencias declaradas. Fixtures `prosa` extendidas. Spec §3.13b.
+
+**Guardia de cierre: agotar `maxWaves` ya no tira la corrida.** Un eslabón serial cuesta dos waves, así que 5 eslabones con `maxWaves=10` consumieron el tope justo al terminar de implementar y la corrida murió BLOCKED con las 7 issues DONE, sin review fleet ni PR final. Al agotarse el tope corre un scout más: si el scope quedó completo, sigue a Review y cierre; si no, el status es `WAVE_CAP` con el piso a usar. Del lado del comando, ese piso —`2 × eslabones_seriales + 2`— se calcula antes de lanzar. Spec §3.14.
+
+**Dos fricciones del serializer, de fábrica.** El worktree efímero del PR se suelta ANTES del merge: `--delete-branch` borra también la copia local y falla si la branch sigue checkouteada (dos PRs de la corrida se resolvieron a mano). Y la resolución del merge-resolver se pushea en el acto —el camino del refresh ya lo hacía, el del PR no—; si el push falla, el PR queda `merge-blocked` conservando el worktree, único lugar donde vive esa resolución.
+
+**Tres menores:** `milestone:PRD-0030` resuelve por prefijo el título real `PRD-0030 — Informe de …` (ambigüedad = muerte con la lista de candidatos, nunca elección silenciosa); el scope viaja como una sola descripción legible, así que un `args.scope` string deja de imprimir `undefined:undefined` en el banner, en el packet del resolver, en el prompt del juez y en el **título del PR final** (que en esta corrida salió bien sólo porque el serializer improvisó uno propio); y las issues DONE que ve cualquier scout alimentan el `Closes #` del PR final, no sólo las que publicó la corrida.
+
+**Proceso:** en corrida AFK autorizada, los edges que el `check` reclama los ejecuta el T0 —metadata reversible, con el comando ya escrito— y lo reporta. Supervisado, los muestra y espera.
+
 ## 4.5.0 (2026-08-10)
 
 **Bloqueante saldado en la integradora** (leo-stack #26, expuesto por la corrida `ready-for-agent-0809` de omega-radar): un bloqueante del scope con PR mergeado a la rama integradora se descuenta del gate de dependencias aunque GitHub lo siga contando abierto — su código ya está en la base desde la que branchea el dependiente, y la issue recién cierra con el PR final a la default branch. Sin el descuento, un scope en cadena A←B←C avanzaba un eslabón por corrida y por botón verde. Bloqueantes fuera del scope siguen rigiéndose por el grafo tal cual. Fixture `cadena` en el test. Spec §3.13.

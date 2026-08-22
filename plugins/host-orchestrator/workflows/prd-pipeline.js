@@ -119,6 +119,13 @@ const SCOPE_ARG =
       ? A.scope.value
       : `${A.scope.type}:${A.scope.value}`
 
+// Descripción LEGIBLE del scope, derivada una sola vez. Con `args.scope` string,
+// `A.scope.type/.value` da "undefined:undefined", y eso viajaba al banner, al packet
+// del merge-resolver, al prompt del judge y al TÍTULO del PR final. En la corrida
+// prd-0030-0818 el serializer improvisó un título correcto por su cuenta: salió bien
+// de casualidad, y una desviación silenciosa del prompt no es una salvaguarda.
+const SCOPE_DESC = typeof A.scope === 'string' ? A.scope : `${A.scope.type}:${A.scope.value}`
+
 // Sin el CLI no hay bucketing, y un `sh undefined` daría issues vacío que el
 // motor leería como "nada accionable" — un scope entero salteado en silencio.
 const READ_CLI = A.readCli
@@ -398,6 +405,22 @@ function serializar(tarea, etiqueta, faseTag) {
 }
 
 // ---------------------------------------------------------------------------
+// Scout (§3.4b): TRANSPORTE, no juicio. El bucketing lo computa pipeline-read.sh
+// sobre el grafo nativo de GitHub; acá sólo hace falta un turno con shell, porque
+// el script del Workflow no tiene ninguna.
+// ---------------------------------------------------------------------------
+function scoutear(etiqueta, faseTag) {
+  return llamar(
+    (suf) => `Sos un TRANSPORTE (${etiqueta}, corrida ${A.runLabel}), no un analista. Corré EXACTAMENTE este comando y devolvé su salida por el output estructurado, tal cual:
+
+cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}
+
+El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
+    { label: `scout:${etiqueta}`, phase: faseTag, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
+  )
+}
+
+// ---------------------------------------------------------------------------
 // merge-resolver (agentType del plugin): recomienda; el serializer ejecuta.
 // ---------------------------------------------------------------------------
 function resolver(packet, etiqueta, faseTag) {
@@ -421,7 +444,7 @@ IMPORTANTE: reportá tu recomendación por el output estructurado (schema), no p
 // ===========================================================================
 phase('Setup')
 log(
-  `▶ ${A.runLabel} — scope ${A.scope.type}:${A.scope.value} — rama ${RAMA} sobre ${BASE} — ` +
+  `▶ ${A.runLabel} — scope ${SCOPE_DESC} — rama ${RAMA} sobre ${BASE} — ` +
     `budget ${BUDGET_TOTAL ? Math.round(BUDGET_TOTAL / 1000) + 'k' : 'SIN TOPE'}` +
     `${A.budgetTotal ? ' (por args)' : budget.total ? ' (por directiva)' : ''} — ts=${A.ts}`
 )
@@ -454,6 +477,17 @@ const specsDelScope = new Set() // issues padre (spec) que el scope atraviesa: l
 let inReviewUltimo = [] // PRs rojos/no-mergeables: NO accionables por el motor, van a para_leo
 let allDone = false
 let baseMetrics = null
+let wavesAgotadas = false // el loop terminó por el tope, no por quedarse sin trabajo
+let cortePorWaves = false // …y el scope seguía incompleto: distinto de un corte por budget
+
+// Lo que cada scout deja registrado: los specs que el scope atraviesa y las issues
+// ya DONE. Las DONE alimentan el `Closes #` del PR final — derivarlas del scout y no
+// sólo de los publish de esta corrida cubre el caso en que el trabajo ya estaba hecho
+// (un resume, o un scope que llega completo): sin esto el PR final salía sin autocierre.
+const registrarScout = (s) => {
+  for (const x of s?.specs ?? []) specsDelScope.add(x)
+  for (const i of s?.issues ?? []) if (i.bucket === 'DONE') cerradas.push(i.number)
+}
 
 for (let wave = 1; wave <= A.maxWaves; wave++) {
   if (BUDGET_TOTAL && restante() < A.minBudgetWave) {
@@ -475,20 +509,13 @@ for (let wave = 1; wave <= A.maxWaves; wave++) {
     scout = A.scopeInicial
     log(`scout w1: pre-fetch de T0 (sin agente)`)
   } else {
-    scout = await llamar(
-      (suf) => `Sos un TRANSPORTE (wave ${wave}, corrida ${A.runLabel}), no un analista. Corré EXACTAMENTE este comando y devolvé su salida por el output estructurado, tal cual:
-
-cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}
-
-El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
-      { label: `scout:w${wave}`, phase: FASE, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
-    )
+    scout = await scoutear(`w${wave}`, FASE)
   }
   if (!scout) {
     log(`✖ scout de la wave ${wave} murió — ABORT`)
     return { status: 'ABORT', fase: FASE, detalle: 'scout murió', waves: wavesReporte }
   }
-  for (const s of scout.specs ?? []) specsDelScope.add(s)
+  registrarScout(scout)
   const buckets = {}
   for (const i of scout.issues) (buckets[i.bucket] ??= []).push(i)
   log(
@@ -528,7 +555,7 @@ Worktree: ${WT_INTEGRACION} (rama ${RAMA}, worktree local de integración). Tare
 Corré vos: cd ${WT_INTEGRACION} && git merge origin/${BASE} — y resolvé los conflictos EN LOS ARCHIVOS.
 
 ## Intent packet
-Rama integradora del pipeline ${A.runLabel} (scope ${A.scope.type}:${A.scope.value}): acumula los PRs de las issues del scope. ${BASE} trae trabajo externo al pipeline. Criterio: preservar AMBAS intenciones; ante incompatibilidad semántica real, ABORT + INCOMPATIBLE.
+Rama integradora del pipeline ${A.runLabel} (scope ${SCOPE_DESC}): acumula los PRs de las issues del scope. ${BASE} trae trabajo externo al pipeline. Criterio: preservar AMBAS intenciones; ante incompatibilidad semántica real, ABORT + INCOMPATIBLE.
 
 ## Conflicto reportado
 ${refresh.detalle}`,
@@ -606,13 +633,34 @@ ${prep?.detalle ?? 'sin detalle'}`,
         `pr${prNum}`,
         FASE
       )
-      if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
-        await serializar(
-          `El merge del PR #${prNum} quedó bloqueado por el resolver (${v?.resolution ?? 'resolver murió'}: ${v?.resumen ?? ''}). Aplicá: gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "merge-resolver: ${v?.resumen ?? 'sin veredicto'} (pipeline ${A.runLabel})" (contexto audit: pr-${prNum}-blocked). Limpiá el worktree ${wtPr} (git worktree remove --force).`,
+      const bloquear = async (motivo, { conservarWorktree = false } = {}) =>
+        serializar(
+          `El merge del PR #${prNum} quedó bloqueado (${motivo}). Aplicá: gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})" (contexto audit: pr-${prNum}-blocked). ${
+            conservarWorktree
+              ? `CONSERVÁ el worktree ${wtPr}: tiene trabajo commiteado que no está en ningún otro lado.`
+              : `Limpiá el worktree ${wtPr} (git worktree remove --force).`
+          }`,
           `block-pr${prNum}`,
           FASE
         )
+      if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
+        const motivo = `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`
+        await bloquear(motivo)
         waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: v?.resumen })
+        continue
+      }
+      // El resolver commitea LOCAL y no pushea (por contrato). El camino del refresh
+      // ya tenía su push explícito; éste no, y la branch llegaba al merge con commits
+      // sin publicar — lo rescataba el paso 1 del merge, dos veces en prd-0030-0818.
+      // Publicar acá deja el PR mostrando lo que realmente se va a mergear.
+      const pushPr = await serializar(
+        `El merge-resolver dejó resuelto y commiteado el merge de origin/${RAMA} en ${wtPr} (branch ${iss.pr_branch}, PR #${prNum}). Verificá que el merge esté cerrado (sin conflict markers, working tree limpio) y pusheá ${iss.pr_branch} (contexto audit: pr-${prNum}-resolved-push). Si el árbol NO está limpio o el push falla: status 'blocked' con el detalle.`,
+        `pr${prNum}-push`,
+        FASE
+      )
+      if (pushPr?.status === 'blocked') {
+        await bloquear(`resolución sin publicar: ${pushPr.detalle ?? 'push fallido'}`, { conservarWorktree: true })
+        waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: pushPr.detalle })
         continue
       }
       conflicto = false
@@ -631,9 +679,10 @@ ${prep?.detalle ?? 'sin detalle'}`,
     }
     const mrg = await serializar(
       `Mergear el PR #${prNum} a ${RAMA}:
-1. Si la branch del PR avanzó localmente en ${wtPr} (merge de refresh o resolución), asegurate de que esté pusheada.
-2. CHECK: ¿ya está mergeado? → si no: gh pr merge ${prNum} --squash --delete-branch (contexto audit: pr-${prNum}-merge)
-3. Limpiá el worktree ${wtPr} (git worktree remove --force). En ${WT_INTEGRACION}: git pull --ff-only.`,
+1. Si la branch del PR avanzó localmente en ${wtPr} (merge de refresh o resolución), asegurate de que esté pusheada — lo que no está en el remoto no entra al merge.
+2. SOLTÁ LA BRANCH ANTES DE MERGEAR: git worktree remove --force ${wtPr} && git worktree prune. \`--delete-branch\` borra también la copia local y FALLA si la branch sigue checkouteada en un worktree; limpiar después del merge era el orden equivocado (2 PRs de la corrida prd-0030-0818 se resolvieron a mano por esto). El trabajo ya está pusheado en el paso 1: el worktree no guarda nada.
+3. CHECK: ¿ya está mergeado? → si no: gh pr merge ${prNum} --squash --delete-branch (contexto audit: pr-${prNum}-merge)
+4. En ${WT_INTEGRACION}: git pull --ff-only.`,
       `merge-pr${prNum}`,
       FASE
     )
@@ -688,6 +737,7 @@ ${prep?.detalle ?? 'sin detalle'}`,
   }
 
   wavesReporte.push(waveResumen)
+  if (wave === A.maxWaves) wavesAgotadas = true
   log(`✔ wave ${wave} cerrada: ${waveResumen.merges.length} merges procesados, ${waveResumen.impl.length} impls — spent ${Math.round(budget.spent() / 1000)}k`)
 }
 
@@ -753,6 +803,34 @@ Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, 
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
   return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl }
+}
+
+// ===========================================================================
+// GUARDIA DE CIERRE (§3.14) — agotar el tope no puede tirar la corrida entera
+//
+// Cada eslabón serial de una cadena cuesta DOS waves (implementar + mergear), así
+// que un scope de 5 eslabones con maxWaves=10 consume el tope justo al terminar de
+// implementar. Con el `all_done` decidiéndose sólo al ABRIR una wave, ese final —
+// 7 issues DONE, sin review fleet y sin PR final — era el peor posible: todo el
+// gasto hecho y nada del cierre (corrida prd-0030-0818, destrabada a mano con
+// resumeFromRunId + maxWaves=14). Un scout más, el rol más barato, distingue
+// "no llegué" de "llegué justo en la última".
+// ===========================================================================
+if (!allDone && wavesAgotadas) {
+  log(`■ maxWaves (${A.maxWaves}) agotadas — verificando si el scope quedó completo antes de cerrar`)
+  const verif = await scoutear('cierre', 'Cierre')
+  registrarScout(verif)
+  if (verif?.all_done) {
+    allDone = true
+    log(`✔ el scope quedó completo en la última wave — sigue a Review y PR final pese al tope`)
+  } else {
+    cortePorWaves = true
+    const falta = (verif?.issues ?? []).filter((i) => i.bucket !== 'DONE' && i.bucket !== 'SPEC').length
+    pendientes.push(
+      `tope de waves alcanzado con ${falta || 'varias'} issue(s) sin cerrar — relanzá con maxWaves ≥ 2 × eslabones_seriales + 2`
+    )
+    log(`■ tope de waves alcanzado y el scope sigue incompleto (${falta} pendiente(s)) — sin review ni PR final`)
+  }
 }
 
 // ===========================================================================
@@ -855,7 +933,7 @@ Reportá findings ESTRUCTURADOS (título · file:line · severidad alta/media/ba
       if (hallazgosCrudos.length > 0) {
         juicio =
           (await llamar(
-            (suf) => `Sos el JUEZ de un review fleet sobre el diff integrado ${BASE}...${RAMA} (repo en ${WT_INTEGRACION}, solo lectura). Scope: ${A.scope.type}:${A.scope.value}.
+            (suf) => `Sos el JUEZ de un review fleet sobre el diff integrado ${BASE}...${RAMA} (repo en ${WT_INTEGRACION}, solo lectura). Scope: ${SCOPE_DESC}.
 
 FINDINGS (${hallazgosCrudos.length}):
 ${JSON.stringify(hallazgosCrudos, null, 1)}
@@ -986,7 +1064,7 @@ if (allDone) {
     `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}.
 1. cd ${WT_INTEGRACION} && git pull --ff-only
 2. CHECK identidad de trabajo: ¿ya existe PR (abierto o mergeado) ${RAMA} → ${BASE}? → reportá su número ('ya_estaba'). Si ya existe y está ABIERTO pero su body NO trae los "Closes #" de abajo, editalo con gh pr edit para agregarlos.
-3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${A.scope.type}:${A.scope.value} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), nota del review fleet, y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}
+3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), nota del review fleet, y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}
 4. Sobre el PR (nuevo o 'ya_estaba', si está ABIERTO): gh pr comment <numero> --body "@coderabbitai review" — CodeRabbit skipea drafts y bases no-default por config, el comentario fuerza la review externa; el T0 triagea sus observaciones después (contexto audit: pr-final-coderabbit). Idempotencia: si el PR ya tiene un comentario "@coderabbitai review", no dupliques.`,
     'pr-final',
     'Cierre'
@@ -995,7 +1073,7 @@ if (allDone) {
 }
 
 const reporte = {
-  status: allDone ? 'DONE' : pendientes.length ? 'BUDGET_CUT' : 'BLOCKED',
+  status: allDone ? 'DONE' : cortePorWaves ? 'WAVE_CAP' : pendientes.length ? 'BUDGET_CUT' : 'BLOCKED',
   corrida: A.runLabel,
   ts_lanzamiento: A.ts,
   scope: A.scope,

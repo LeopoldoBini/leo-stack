@@ -1,2 +1,4 @@
 301	open	ready-for-agent	0	0		Slice heredado	Blocked by #99, #98 -- migrado de un repo viejo.
 302	open	ready-for-agent	1	0		Slice al dia	Blocked by #97 (con edge nativo).
+303	open	ready-for-agent	0	0		Brief de to-tickets	## What to build\nUn cliente nuevo.\n\n### Blocked by\n\n- #594 (cliente APIMarkeyV2).\n- #595 (capa de datos).\n\n### Acceptance criteria\n\n- #999 no es dependencia: vive en otra seccion.
+304	open	ready-for-agent	1	0		Brief con un edge de dos	### Blocked by\n\n- #97 (ya tiene edge).\n- #96 (le falta el edge).

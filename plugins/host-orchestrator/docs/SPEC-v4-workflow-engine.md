@@ -250,6 +250,10 @@ POSIX sh usando solo `gh` (su `--jq` incorporado evita el jq externo). Tres subc
 
 Tres trampas de sh que costaron una corrida cada una y quedan cubiertas por el test: `gh` se come el stdin de un `while read` (va `</dev/null`), un `printf` sin `\n` final hace que `read` descarte el último ítem, y el endpoint `dependencies/blocked_by` lista **todos** los bloqueantes mientras el summary cuenta solo los abiertos.
 
+**Lo que `check` entiende por "dependencia declarada"** (4.6.0): los dos formatos que aparecen en briefs reales — la línea inline `Blocked by: #N, #M` de los repos heredados y la **sección `### Blocked by` con bullets**, que es la que emite `to-tickets`. Ese segundo formato era invisible y el check daba verde con el grafo vacío. Las referencias se extraen token por token (`#N`): partir el bullet por no-dígitos convierte el `2` de `APIMarkeyV2` en una issue inexistente. Y la comparación va contra la **lista real de edges** de cada issue, no contra el contador `blocked_by` del summary: una issue con un edge y dos dependencias declaradas contaba como al día.
+
+**Milestone por prefijo** (4.6.0): título exacto primero; si no hay, prefijo (`milestone:PRD-0030` resuelve `PRD-0030 — Informe de …`). Dos títulos que empiezan igual mueren con la lista de candidatos: elegir por orden de la API sería silencioso y elegiría mal la mitad de las veces.
+
 **Límite declarado:** las fixtures guardan la salida ya filtrada por `--jq`, así que el test ejercita la tabla de decisión —lo que puede divergir— y no las expresiones jq. Esas se validan corriendo el CLI contra un repo real.
 
 #### 3.13c El scout es transporte, no juicio
@@ -261,6 +265,14 @@ Sus seis reglas de bucketing eran booleanas y ninguna necesita el body: hoy ped�
 La fleet no tenía eje Spec. Entra **un solo** reviewer sobre el **diff integrado completo** (el único que lo ve entero, contra el pre-filtrado de §3.7b) porque el scope creep es una pregunta de *todo el diff contra todo el spec*: fragmentarlo por unidad le da a cada reviewer un pedazo de cada uno, que es la receta del falso positivo — "esto no lo pidió nadie" cuando sí, en la sección que no le tocó. Los specs salen de los `parent_issue_url` distintos del scope, así que un milestone que cruza dos specs los recibe a los dos.
 
 **Ruteo:** sus hallazgos de scope creep entran al juez pero van a **HUMANO, nunca a APLICAR** — "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los que señalan un requisito *incumplido* sí pueden ir a APLICAR. Precondición del ruteo: la lente se pega a cada finding **antes** de filtrar los reviewers muertos; filtrando primero, un reviewer caído corre los índices y etiqueta mal todo lo que sigue.
+
+### 3.14 Guardia de cierre y disciplina del serializer (4.6.0, corrida `prd-0030-0818`)
+
+**El tope de waves no puede tirar la corrida entera.** Un eslabón serial cuesta DOS waves —implementar y mergear— así que una cadena de 5 con `maxWaves=10` consume el tope justo al terminar de implementar. Con `all_done` decidiéndose sólo al ABRIR una wave, ese final era el peor posible: 7 issues DONE, sin review fleet y sin PR final; todo el gasto hecho y nada del cierre. Al agotarse el tope corre **un scout más** —el rol más barato— que distingue *no llegué* de *llegué justo en la última*: si el scope quedó completo, la corrida sigue a Review y PR final; si no, el reporte sale con status `WAVE_CAP` y el piso a usar (`2 × eslabones_seriales + 2`), que es dato distinto de un corte por budget. El complemento está del lado del comando: ese piso se calcula antes de lanzar.
+
+Las issues **DONE que ve cualquier scout** alimentan el `Closes #` del PR final, no sólo las que esta corrida publicó: un scope que llega ya terminado —un resume, un re-lanzamiento— dejaba el PR final sin autocierre.
+
+**Dos fricciones del serializer, resueltas de fábrica.** `gh pr merge --delete-branch` borra también la copia local y **falla si la branch sigue checkouteada en un worktree**: el worktree efímero del PR se suelta ANTES del merge, no después (el orden anterior costó dos resoluciones a mano). Y el merge-resolver commitea local por contrato: el camino del refresh ya tenía su push explícito, el del PR no, y la branch llegaba al merge con commits sin publicar. Ahora publica ahí mismo, y si el push falla el PR queda `merge-blocked` **conservando** el worktree, que es el único lugar donde vive esa resolución.
 
 ## 4. Migración v3 → v4
 
