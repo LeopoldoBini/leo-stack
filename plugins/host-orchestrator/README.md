@@ -10,7 +10,7 @@ Punto de entrada: **`/prd-pipeline`** (invocación explícita de Leo, nunca del 
 /prd-pipeline "#42,#43,#44" --dry-run     # plan + args, sin lanzar
 ```
 
-**`/desatendido`** es la pieza suelta del plugin: la disciplina con la que un agente lleva un encargo hasta el final sin nadie mirando. No despacha nada ni depende del motor — sirve igual en la Mac que en la devbox, con pipeline o sin él. La invoca Leo junto con el encargo.
+**`/desatendido`** es la pieza suelta del plugin: la disciplina con la que un agente lleva un encargo hasta el final sin nadie mirando. No despacha nada ni depende del motor — sirve igual en la Mac que en la devbox, con pipeline o sin él. La invoca Leo junto con el encargo, y el objetivo que le dé tiene que ser **verificable**: no «mejorá los pliegos» sino «que estas cinco fuentes tengan sus adjuntos, probado con el conteo antes y después». Sin un *llegar* comprobable el agente inventa su propia línea de meta, siempre más cerca que la de Leo.
 
 Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de operación en `CLAUDE.md` (regla HITL + puntero `cc-afk`) y el `.host-orchestrator/config.json`. Una vez por repo, idempotente.
 

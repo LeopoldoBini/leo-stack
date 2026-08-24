@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.8.2 (2026-08-24)
+
+**El consejo a Leo sale del skill y sube al README.** Era material humano dentro de un documento que lee un agente: no cambiaba su comportamiento —para cuando lo lee, el encargo ya está dado— y decía desde el lado del que pide lo mismo que la sección 1 ya resuelve desde el lado del que ejecuta. Vive donde se consulta antes de invocar, sin pagar contexto en cada corrida.
+
 ## 4.8.1 (2026-08-24)
 
 **`/desatendido` pierde la sección que reponía el flujo del pipeline** (aislar, commits locales, PR sin mergear). Sobrevivía por herencia, no por necesidad: el skill sirve igual en un repo sin pipeline, y esas cuatro reglas ataban la metodología a una forma de trabajo que no siempre aplica. Quedan cinco secciones; el eje —bloqueo no es dificultad, terminado significa verificado— no se toca.

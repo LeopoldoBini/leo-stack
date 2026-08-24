@@ -75,11 +75,3 @@ Corto, y en este orden:
 2. La **salida real** de la verificación del criterio de la sección 1.
 3. Si hubo bloqueo: qué falta exactamente, quién lo puede destrabar, y qué quedó terminado igual.
 4. Las decisiones que tomaste solo, una línea cada una.
-
----
-
-## Para Leo, al dar el encargo
-
-El objetivo tiene que ser **verificable**. No "mejorá los pliegos", sino "que estas cinco fuentes tengan sus adjuntos, probado con el conteo antes y después".
-
-Sin un *llegar* comprobable, "no pares hasta llegar" no tiene dónde apoyarse: el agente inventa su propia línea de meta, y siempre queda más cerca que la tuya.
