@@ -10,6 +10,8 @@ Punto de entrada: **`/prd-pipeline`** (invocación explícita de Leo, nunca del 
 /prd-pipeline "#42,#43,#44" --dry-run     # plan + args, sin lanzar
 ```
 
+**`/desatendido`** es la pieza suelta del plugin: la disciplina con la que un agente lleva un encargo hasta el final sin nadie mirando. No despacha nada ni depende del motor — sirve igual en la Mac que en la devbox, con pipeline o sin él. La invoca Leo junto con el encargo.
+
 Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de operación en `CLAUDE.md` (regla HITL + puntero `cc-afk`) y el `.host-orchestrator/config.json`. Una vez por repo, idempotente.
 
 ## Fuentes de verdad (sin duplicación acá)
@@ -21,6 +23,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
 | Qué se siembra al adoptar el plugin en un repo | `commands/init.md` |
 | Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md` |
+| Cómo trabaja un agente sin nadie mirando, dentro o fuera del pipeline | `skills/desatendido/SKILL.md` |
 | El lado de lectura, corrible a mano antes de lanzar | `scripts/pipeline-read.sh` — spec §3.13b |
 | Contrato por repo (opcional, con defaults) | `.host-orchestrator/config.json` — spec §3.10 |
 | Historial de versiones | `docs/CHANGELOG.md` |
@@ -39,6 +42,9 @@ host-orchestrator/
 ├── commands/
 │   ├── prd-pipeline.md                    # /prd-pipeline — lanza el motor
 │   └── init.md                            # /init — onboarding del repo
+├── skills/
+│   └── desatendido/
+│       └── SKILL.md                       # /desatendido — correr sin supervisión
 ├── scripts/
 │   ├── pipeline-read.sh                   # scope · check · intent (solo lectura)
 │   ├── test-pipeline-read.sh              # su test, contra fixtures/

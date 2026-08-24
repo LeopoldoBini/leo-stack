@@ -2,6 +2,16 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.8.0 (2026-08-24)
+
+**Skill `/desatendido` — la receta de trabajo autónomo sin supervisión.** Destilada de una instrucción que Leo dio a mano y funcionó, más lo que ya estaba curado en la disciplina del implementer. Es metodología pura: no despacha nada, no depende del motor, y corre igual en la Mac que en la devbox.
+
+El reencuadre: el fracaso caro no es un agente que rompe algo —eso lo absorbe un PR sin mergear— sino uno que vuelve a la mitad. Así que el skill va sobre terminación, no sobre contención. El eje es una distinción que reemplaza a todos los gates: **bloqueo no es dificultad**. Un test que no pasa, un portal que cambió o un disco lleno son trabajo; lo único que justifica volver es que falte una pieza fuera del alcance del agente y que no pueda fabricar. Y lo único duro adentro es que terminado significa verificado, con la salida real pegada.
+
+Sin caps, sin gates y sin configuración: decisión explícita. Donde parecería faltar un freno, la respuesta es criterio mejor escrito.
+
+Del plugin se roba la disciplina de cerrar una pieza —aislar, criterio de terminado que se ejecuta, commits locales, PR sin mergear— fuera del flujo del pipeline.
+
 ## 4.7.0 (2026-08-24)
 
 **`effort: xhigh` en `parallel-implementer` y `merge-resolver`.** El esfuerzo no se hereda de la sesión que lanza el pipeline —solo el modelo—, así que los dos agentes venían corriendo en el default `high` sin importar en qué estuviera el orquestador: un escalón por debajo sin que se notara en ninguna corrida. La doc de Anthropic recomienda `xhigh` para coding y trabajo agéntico, que es exactamente lo que hace el implementer (TDD e iteración contra criterios de aceptación); y el resolver decide sobre lo que ningún test atrapa, porque un merge mal resuelto entra a la integradora en verde.
