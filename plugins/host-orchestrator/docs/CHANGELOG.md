@@ -2,6 +2,12 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.7.0 (2026-08-24)
+
+**`effort: xhigh` en `parallel-implementer` y `merge-resolver`.** El esfuerzo no se hereda de la sesión que lanza el pipeline —solo el modelo—, así que los dos agentes venían corriendo en el default `high` sin importar en qué estuviera el orquestador: un escalón por debajo sin que se notara en ninguna corrida. La doc de Anthropic recomienda `xhigh` para coding y trabajo agéntico, que es exactamente lo que hace el implementer (TDD e iteración contra criterios de aceptación); y el resolver decide sobre lo que ningún test atrapa, porque un merge mal resuelto entra a la integradora en verde.
+
+Sin cambios de modelo: los dos siguen en Opus.
+
 ## 4.6.0 (2026-08-22)
 
 Siete afinados de la corrida `prd-0030-0818` (App.SaltaCompra, 7 issues en cadena de 5 eslabones, PR #609). La corrida terminó DONE: esto es afinado, no rescate — y el `resumeFromRunId` que la destrabó repuso 74 agentes de caché sin re-trabajo.
