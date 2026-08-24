@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.8.1 (2026-08-24)
+
+**`/desatendido` pierde la sección que reponía el flujo del pipeline** (aislar, commits locales, PR sin mergear). Sobrevivía por herencia, no por necesidad: el skill sirve igual en un repo sin pipeline, y esas cuatro reglas ataban la metodología a una forma de trabajo que no siempre aplica. Quedan cinco secciones; el eje —bloqueo no es dificultad, terminado significa verificado— no se toca.
+
 ## 4.8.0 (2026-08-24)
 
 **Skill `/desatendido` — la receta de trabajo autónomo sin supervisión.** Destilada de una instrucción que Leo dio a mano y funcionó, más lo que ya estaba curado en la disciplina del implementer. Es metodología pura: no despacha nada, no depende del motor, y corre igual en la Mac que en la devbox.

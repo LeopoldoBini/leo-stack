@@ -67,16 +67,7 @@ No es prolijidad: es lo único que separa *hecho* de *dice que está hecho*.
 - Esto viaja en el encargo de cada agente que convocás, junto con qué evidencia tiene que traer. Un subagente que vuelve con "quedó andando" no terminó: mandalo de nuevo a buscar la salida.
 - La prueba dura, cuando aplica: **si borrás lo que hiciste, ¿la verificación se pone en rojo?** Si sigue en verde, no estaba verificando nada.
 
-## 5. Lo que se roba del pipeline
-
-De la disciplina del `agents/parallel-implementer.md` de este plugin, fuera de su flujo:
-
-- **Trabajá aislado.** Rama propia o worktree, para no pisar a nadie y para que romper salga barato.
-- **El criterio de terminado se ejecuta, no se opina.** El test que fallaba y ahora pasa; el conteo que era 2 y ahora es 5.
-- **Commiteá localmente a medida que cerrás piezas.** Un bloqueo a mitad de camino te devuelve el trabajo hecho, no un worktree sucio.
-- **Abrí el PR, no lo mergees.** Ahí es donde la libertad se paga sola: lo que rompiste no llegó a ningún lado.
-
-## 6. Qué devolvés
+## 5. Qué devolvés
 
 Corto, y en este orden:
 
