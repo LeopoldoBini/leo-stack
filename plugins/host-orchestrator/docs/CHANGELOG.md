@@ -2,6 +2,16 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.11.0 (2026-08-25)
+
+**Sale del motor el rol que tiene prohibido opinar: nace `measurer`.** Corre el typecheck y la suite del repo, cuenta, y devuelve números con el comando que los produjo. No arregla, no diagnostica, no interpreta — y no tiene herramientas de escritura, así que la restricción es estructural y no una promesa del prompt.
+
+Existe por el modo de falla que `/desatendido` nombra y no podía prevenir: la victoria falsa. Una sesión que implementa y después se verifica a sí misma es juez y parte, y la instrucción de verificar no rompe esa unión — solo la pide. Con el medidor aparte, el número viene de alguien que no escribió el código. Segundo beneficio, que se nota en corridas largas: el log entero de una suite roja deja de entrar en la ventana de quien la corrió, y entran cuatro números y la lista de archivos rojos.
+
+Se queda con las dos reglas del rol inline que valían fuera del pipeline. Un output vacío jamás es cero: un comando que no imprimió nada no pasó, falló al correr. Y la frontera entre hecho y lectura — copiar textual el error es un hecho y va en el informe; resumirlo en una causa es una lectura, y es justo lo que la sesión encargó a otro. La versión suelta agrega que descubre el comando en vez de recibirlo (CLAUDE.md, manifiesto, lockfile, CI, en ese orden) y que reporta la contradicción cuando el exit code y el log se desmienten, en vez de elegir uno.
+
+Quedan cuatro roles inline en el motor y ahí se quedan. El juez come findings, no código: suelto habría que empaquetarle revisores adelante y sería un `/code-review` de tercera mano. El scout duplica el `Explore` de fábrica. Y el serializador solo tiene sentido ordenando escrituras remotas entre agentes en paralelo.
+
 ## 4.10.0 (2026-08-25)
 
 **La doctrina de implementación deja de vivir solo adentro del pipeline: nace `implementer`, hermano suelto de `parallel-implementer`.** Misma disciplina —criterios de aceptación numerados, red-green de a uno, la regla de bronce, recursos vivos chequeados contra lo real en el momento, los antipatrones de test que no se embarcan—, pero recibe un encargo en prosa y devuelve un informe en prosa. Sin worktree, sin issue de GitHub, sin sobre XML. Declara `effort: xhigh`, que pisa el de la sesión que lo convoca, así que una sesión en `high` puede pedirle un tramo de implementación sin subir su propio dial.
