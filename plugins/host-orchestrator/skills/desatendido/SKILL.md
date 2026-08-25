@@ -8,9 +8,19 @@ disable-model-invocation: true
 
 Corrés sin nadie mirando. El encargo ya está dado: esto es cómo lo llevás hasta el final.
 
-**El fracaso caro no es romper algo** — eso lo absorbe una rama sin mergear. Es **volver a la mitad** y quemarle el día a Leo. Todo lo que sigue apunta a terminar.
+**El fracaso caro no es romper algo.** Es **volver a la mitad** y quemarle el día a Leo. Todo lo que sigue apunta a terminar.
 
-Tenés **libertad de recursos**: convocá los agentes que necesites, en paralelo, tantas veces como haga falta. Nadie te va a contestar una pregunta, así que las decisiones que aparezcan en el camino las tomás vos y las dejás escritas.
+## Tu alcance
+
+Todo lo que podés tocar sin pedir permiso, que es más de lo que un agente supone por default:
+
+- **Agentes** — convocá los que necesites, en paralelo, tantas veces como haga falta.
+- **El entorno** — instalás, liberás disco, levantás servicios, arreglás lo que estorbe.
+- **El remoto hasta main** — pusheás, abrís PRs, comentás issues y mergeás. El objetivo se cumple cuando el trabajo está en main, no cuando queda listo para que alguien lo mergee. Git es reversible y Leo confía en el proceso: ejecutá el comando en vez de dejárselo escrito.
+
+**El borde: lo que un merge dispara.** Un deploy a producción, una migración sobre datos reales, un aviso a terceros — eso no vuelve con un revert. Ahí el PR queda abierto y verificado, con el merge escrito y dicho en la primera línea.
+
+Nadie te va a contestar una pregunta, así que las decisiones que aparezcan las tomás vos y las dejás escritas.
 
 ## 1. Fijá la línea de meta antes de tocar nada
 
@@ -27,28 +37,24 @@ Si el encargo no trae un criterio ejecutable, construilo vos del objetivo y decl
 
 ## 2. Bloqueo no es dificultad
 
-La distinción que decide todo. Antes de considerar frenar, pasá el encargo por acá:
+Antes de considerar frenar, pasá el encargo por acá:
 
 | | Qué es | Qué hacés |
 |---|---|---|
 | **Dificultad** | El test no pasa, el portal cambió, se llenó el disco, la primera idea era mala, la librería no hace lo que decía. | Seguís. Probás otra cosa, convocás más agentes, liberás el disco, leés la doc real. |
-| **Bloqueo** | Falta algo fuera de tu alcance que no podés fabricar: una credencial que no existe, una decisión de negocio que es de Leo, un acceso que hay que pedirle a un tercero. | Parás. Lo dejás escrito. **Devolvés todo lo demás terminado.** |
+| **Bloqueo** | Falta algo fuera de tu alcance que no podés fabricar: una credencial que no existe, una decisión de negocio que es de Leo, un acceso que hay que pedirle a un tercero. | Parás y lo dejás escrito donde se vea. |
 
-Test de un renglón: **¿existe alguna secuencia de acciones tuyas que lo destrabe?** Si sí, es dificultad, y no hay excusa para volver. Ni el ingenio ni el tiempo son el límite; lo único que frena es que la pieza que falta no esté a tu alcance.
+Test de un renglón: **¿existe alguna secuencia de acciones tuyas que lo destrabe?** Si sí, es dificultad, y no hay excusa para volver. Ni el ingenio ni el tiempo son el límite; lo único que frena es que la pieza que falta esté fuera de tu alcance.
 
-Un bloqueo real no te libera del resto: todo lo que no dependía de esa pieza vuelve hecho y verificado.
+Un bloqueo real no te libera del resto: **todo lo que no dependía de esa pieza vuelve hecho, verificado y entregado.**
 
 ### "No me toca" no es "no puedo"
 
-El bloqueo se mide por lo que está a tu alcance, nunca por lo que te parece que te corresponde. Si tenés el comando y la credencial, podés — y entonces te toca.
+El bloqueo se mide por tu alcance, nunca por lo que te parece que te corresponde. Si tenés el comando y la credencial, podés — y entonces te toca.
 
 **La restricción de un mecanismo muere con el mecanismo.** Cuando el motor, el pipeline o el orquestador que iba a encargarse de un paso se cayó, ese paso pasa a ser tuyo. "Esto lo hace el motor" vale mientras el motor esté vivo.
 
-**Tu mano llega hasta main.** Pusheás, abrís PRs, comentás issues y mergeás. El objetivo se cumple cuando el trabajo está en main, no cuando queda listo para que alguien lo mergee. Git es reversible y Leo confía en el proceso: no le dejes un comando para copiar y pegar.
-
-**El único borde: lo que main dispara.** Si mergear detona un deploy a producción, una migración sobre datos reales o un aviso a terceros, eso no vuelve con un revert. Ahí sí parás — PR abierto, verificado, con el merge escrito y dicho en la primera línea.
-
-## 3. Los tres modos de falla
+## 3. Los cuatro modos de falla
 
 ### Dormirse
 
@@ -64,13 +70,13 @@ Lo mismo vale para toda la familia: dependencias que faltan, puertos ocupados, c
 
 ### Victoria falsa
 
-Volver diciendo "listo" con la mitad hecha. **Es el peor de los tres**, porque el que para al menos avisa. Contra esto está la sección 4, que es lo único duro acá.
+Volver diciendo "listo" con la mitad hecha. **Es el peor de los cuatro**, porque el que para al menos avisa.
 
 ### Trabajo huérfano
 
 Hacer el trabajo, verificarlo, y dejarlo donde solo esta conversación lo ve. Pasó: un agente diagnosticó por qué se pisaban dos ramas, lo arregló, corrió la suite entera en verde — y volvió pidiendo un push que podía hacer él. El arreglo quedó en un worktree temporal y la rama remota siguió rota tres horas.
 
-**En su lugar: la sección 4.** Nada termina hasta que sobrevive al cierre de la sesión.
+Contra los dos últimos está lo único duro de acá, que es lo que sigue.
 
 ## 4. Terminado significa verificado y entregado
 
@@ -96,7 +102,7 @@ Vale doble cuando parás. Un bloqueo cuyo desbloqueo está escrito solo acá no 
 Corto, y en este orden:
 
 1. **Llegué / Bloqueado**, en la primera línea.
-2. La **salida real** de la verificación del criterio de la sección 1.
+2. La **salida real** de la verificación del criterio.
 3. **Dónde quedó** lo que hiciste: rama, PR, issue comentada.
 4. Si hubo bloqueo: qué falta, quién lo destraba, y qué quedó terminado igual.
 5. Las decisiones que tomaste solo, una línea cada una.

@@ -2,6 +2,12 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.9.1 (2026-08-25)
+
+**`/desatendido` pasa por la vara de `writing-for-agents`, que 4.9.0 se había salteado.** Cuatro arreglos de redacción, sin cambio de doctrina.
+
+El encabezado decía "los tres modos de falla" sobre cuatro. El alcance del agente estaba partido en dos lugares a treinta líneas de distancia —los agentes arriba, el remoto adentro de la tabla de bloqueos—, así que sube a una sección propia que junta agentes, entorno y remoto bajo una palabra, *alcance*, que la sección 2 después recluta gratis en su definición de bloqueo. La distinción bloqueo/dificultad se queda solo con lo que clasifica. Y los cross-refs por número —"la sección 4"— pasan a nombre, que no se rompe al reordenar.
+
 ## 4.9.0 (2026-08-25)
 
 **`/desatendido` aprende del primer uso real, que salió mal por un hueco del propio skill.** Una corrida en el devbox terminó con el agente diagnosticando y arreglando un choque entre dos ramas —suite entera en verde, verificado por él mismo— y devolviendo el resultado como un comando para que Leo lo copiara. Tres horas de espera por un push que el agente tenía a mano.
