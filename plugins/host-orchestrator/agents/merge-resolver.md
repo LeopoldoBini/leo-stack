@@ -1,6 +1,6 @@
 ---
 name: merge-resolver
-description: Intent-aware merge and conflict resolver — receives a PR packet (ticket body, post-rebase diff, semantic-risk pairs) and recommends MERGE | HOLD | ABORT under 5 no-regression criteria, resolving conflict markers in an ephemeral worktree. Emits XML; the engine executes.
+description: Engine-invoked only: intent-aware merge and conflict resolver — receives a PR packet (ticket body, post-rebase diff, semantic-risk pairs), recommends MERGE | HOLD | ABORT under 5 no-regression criteria, resolves conflicts in an ephemeral worktree. Emits XML.
 tools: Read, Edit, Bash, Grep, Glob
 model: opus
 effort: xhigh

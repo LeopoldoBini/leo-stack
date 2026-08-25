@@ -2,6 +2,14 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.10.0 (2026-08-25)
+
+**La doctrina de implementación deja de vivir solo adentro del pipeline: nace `implementer`, hermano suelto de `parallel-implementer`.** Misma disciplina —criterios de aceptación numerados, red-green de a uno, la regla de bronce, recursos vivos chequeados contra lo real en el momento, los antipatrones de test que no se embarcan—, pero recibe un encargo en prosa y devuelve un informe en prosa. Sin worktree, sin issue de GitHub, sin sobre XML. Declara `effort: xhigh`, que pisa el de la sesión que lo convoca, así que una sesión en `high` puede pedirle un tramo de implementación sin subir su propio dial.
+
+Se escribió con voz propia en vez de bajar la disciplina compartida a un doc que ambos apunten. La razón es la misma que exime a los agentes del techo de 140 líneas: un agente es un system prompt entero, presente en cada uno de sus turnos, no una entrada de progressive disclosure. Un doc leído al arrancar compite con cada archivo que abre después y se diluye justo cuando llega el cuarto criterio de aceptación. El chequeo de duplicación del estándar es lo que fuerza que la voz propia sea real y no un copiar-pegar con el nombre cambiado.
+
+**Las tres descriptions se reescribieron como conjunto, porque son el único enrutador que hay.** No existe forma de marcar un agente como no invocable por el modelo —el campo no existe para agentes, y por eso el estándar los exime de la regla— así que lo único que decide a quién convoca una sesión es lo que cada description dice de sí misma. Las dos del pipeline arrancan ahora con `Engine-invoked only`, la nueva declara al frente que su entrada es prosa. Ninguna toca el cuerpo de los agentes que ya funcionaban.
+
 ## 4.9.1 (2026-08-25)
 
 **`/desatendido` pasa por la vara de `writing-for-agents`, que 4.9.0 se había salteado.** Cuatro arreglos de redacción, sin cambio de doctrina.

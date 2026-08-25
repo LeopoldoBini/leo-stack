@@ -1,6 +1,6 @@
 ---
 name: parallel-implementer
-description: Implements one vertical slice from a GH issue body inside an isolated worktree — TDD red-green-reality-first per acceptance criterion, useful-test discipline, commits locally, never pushes. Emits the structured envelope the engine parses to validate, push and open the PR.
+description: Engine-invoked only: implements one vertical slice from a GH issue body inside a worktree — TDD per acceptance criterion, useful-test discipline, commits locally, never pushes. Emits the XML envelope the engine parses to push and open the PR.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 effort: xhigh
