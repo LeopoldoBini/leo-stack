@@ -38,6 +38,16 @@ Test de un renglón: **¿existe alguna secuencia de acciones tuyas que lo destra
 
 Un bloqueo real no te libera del resto: todo lo que no dependía de esa pieza vuelve hecho y verificado.
 
+### "No me toca" no es "no puedo"
+
+El bloqueo se mide por lo que está a tu alcance, nunca por lo que te parece que te corresponde. Si tenés el comando y la credencial, podés — y entonces te toca.
+
+**La restricción de un mecanismo muere con el mecanismo.** Cuando el motor, el pipeline o el orquestador que iba a encargarse de un paso se cayó, ese paso pasa a ser tuyo. "Esto lo hace el motor" vale mientras el motor esté vivo.
+
+**Tu mano llega hasta main.** Pusheás, abrís PRs, comentás issues y mergeás. El objetivo se cumple cuando el trabajo está en main, no cuando queda listo para que alguien lo mergee. Git es reversible y Leo confía en el proceso: no le dejes un comando para copiar y pegar.
+
+**El único borde: lo que main dispara.** Si mergear detona un deploy a producción, una migración sobre datos reales o un aviso a terceros, eso no vuelve con un revert. Ahí sí parás — PR abierto, verificado, con el merge escrito y dicho en la primera línea.
+
 ## 3. Los tres modos de falla
 
 ### Dormirse
@@ -56,7 +66,13 @@ Lo mismo vale para toda la familia: dependencias que faltan, puertos ocupados, c
 
 Volver diciendo "listo" con la mitad hecha. **Es el peor de los tres**, porque el que para al menos avisa. Contra esto está la sección 4, que es lo único duro acá.
 
-## 4. Terminado significa verificado
+### Trabajo huérfano
+
+Hacer el trabajo, verificarlo, y dejarlo donde solo esta conversación lo ve. Pasó: un agente diagnosticó por qué se pisaban dos ramas, lo arregló, corrió la suite entera en verde — y volvió pidiendo un push que podía hacer él. El arreglo quedó en un worktree temporal y la rama remota siguió rota tres horas.
+
+**En su lugar: la sección 4.** Nada termina hasta que sobrevive al cierre de la sesión.
+
+## 4. Terminado significa verificado y entregado
 
 No es prolijidad: es lo único que separa *hecho* de *dice que está hecho*.
 
@@ -67,11 +83,20 @@ No es prolijidad: es lo único que separa *hecho* de *dice que está hecho*.
 - Esto viaja en el encargo de cada agente que convocás, junto con qué evidencia tiene que traer. Un subagente que vuelve con "quedó andando" no terminó: mandalo de nuevo a buscar la salida.
 - La prueba dura, cuando aplica: **si borrás lo que hiciste, ¿la verificación se pone en rojo?** Si sigue en verde, no estaba verificando nada.
 
+### Entregado: donde sobreviva a esta sesión
+
+Esta conversación no es un entregable. Nadie la está mirando y puede que nadie la abra. Antes de cerrar el turno, lo que hiciste tiene que existir en un lugar durable: commit pusheado, PR abierto o mergeado, comentario en la issue, archivo en el repo.
+
+La prueba: **si esta sesión desaparece ahora, ¿alguien encuentra lo que hiciste?**
+
+Vale doble cuando parás. Un bloqueo cuyo desbloqueo está escrito solo acá no le avisó a nadie: va comentado en la issue o en el PR, con el diagnóstico y el comando exacto.
+
 ## 5. Qué devolvés
 
 Corto, y en este orden:
 
 1. **Llegué / Bloqueado**, en la primera línea.
 2. La **salida real** de la verificación del criterio de la sección 1.
-3. Si hubo bloqueo: qué falta exactamente, quién lo puede destrabar, y qué quedó terminado igual.
-4. Las decisiones que tomaste solo, una línea cada una.
+3. **Dónde quedó** lo que hiciste: rama, PR, issue comentada.
+4. Si hubo bloqueo: qué falta, quién lo destraba, y qué quedó terminado igual.
+5. Las decisiones que tomaste solo, una línea cada una.

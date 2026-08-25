@@ -2,6 +2,14 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.9.0 (2026-08-25)
+
+**`/desatendido` aprende del primer uso real, que salió mal por un hueco del propio skill.** Una corrida en el devbox terminó con el agente diagnosticando y arreglando un choque entre dos ramas —suite entera en verde, verificado por él mismo— y devolviendo el resultado como un comando para que Leo lo copiara. Tres horas de espera por un push que el agente tenía a mano.
+
+**El hueco: la sección 2 medía el bloqueo por capacidad y nunca por permiso.** El agente no dijo "no puedo", dijo "no me toca" — aplicando fuera de contexto una regla del pipeline cuyo motor ya estaba muerto. Ahora la sección lo nombra: la restricción de un mecanismo muere con el mecanismo, y la mano del agente llega hasta main. El único borde es lo que un merge dispara y no vuelve con un revert: deploy a producción, migración sobre datos reales, aviso a terceros.
+
+**El segundo hueco: verificar no era entregar.** La sección 4 pasa a ser "verificado y entregado", con su propia prueba —si esta sesión desaparece ahora, ¿alguien encuentra lo que hiciste?— porque en desatendido la conversación no la lee nadie. Se suma un cuarto modo de falla, el trabajo huérfano, con el caso real adentro.
+
 ## 4.8.2 (2026-08-24)
 
 **El consejo a Leo sale del skill y sube al README.** Era material humano dentro de un documento que lee un agente: no cambiaba su comportamiento —para cuando lo lee, el encargo ya está dado— y decía desde el lado del que pide lo mismo que la sección 1 ya resuelve desde el lado del que ejecuta. Vive donde se consulta antes de invocar, sin pagar contexto en cada corrida.
