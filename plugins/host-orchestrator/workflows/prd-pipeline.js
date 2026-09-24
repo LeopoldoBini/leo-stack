@@ -189,6 +189,7 @@ const MEDICION_SCHEMA = {
     lockfiles: { type: 'array', items: { type: 'string' }, description: 'salida de git ls-files del paso de lockfiles, tal cual' },
     // mecánica del diff contra la rama integradora (solo cuando se pide):
     diff_toca_tests: { type: 'boolean' },
+    tests_del_diff: { type: 'array', items: { type: 'string' }, description: 'archivos del diff que matchean testGlobs' },
     tests_del_diff_verdes: { type: 'boolean' },
   },
 }
@@ -422,8 +423,8 @@ function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {})
   const diff = conDiff
     ? `5. Mecánica del diff contra origin/${RAMA} (timeout 120000):
    ${en} git fetch origin && git diff --name-only origin/${RAMA}...HEAD
-   → diff_toca_tests = ¿algún archivo del diff matchea ${JSON.stringify(A.testGlobs)}?
-   → ${en} <runner con SOLO los archivos de test del diff> → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
+   → tests_del_diff = los archivos del diff que matchean ${JSON.stringify(A.testGlobs)}; diff_toca_tests = ¿hay alguno?
+   → ${A.validateHook ? "si tests_fuente='hook': NO los corras, el motor deriva tests_del_diff_verdes de la salida del hook. Si no: " : ''}${en} <runner con SOLO los archivos de test del diff> → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
     : ''
   const pre = pull ? `0. ${en} git fetch origin && git pull --ff-only origin ${RAMA}\n` : ''
   return llamar(
@@ -447,6 +448,13 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
     const KEYS = A.metricKeys ?? ['typecheck_errors']
     if (r && r.metrics) r.metrics = Object.fromEntries(KEYS.map((k) => [k, r.metrics[k]]))
     if (r) r.lockfiles_ajenos = lockfilesAjenos(r.lockfiles)
+    // §3.3 (4.12.1) — con los tests del hook, los del diff no se re-corren: el hook ya
+    // corrió la suite entera, así que un test del diff está verde si no figura entre los
+    // rojos. La regla vive acá, no en el prompt. Sin tests en el diff → false, como antes.
+    if (r && conDiff && r.tests_fuente === 'hook') {
+      const delDiff = r.tests_del_diff ?? []
+      r.tests_del_diff_verdes = delDiff.length > 0 && !delDiff.some((f) => (r.failing_test_files ?? []).includes(f))
+    }
     return r
   })
 }

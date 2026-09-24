@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.12.1 (2026-09-24)
+
+**Los tests del diff dejan de correrse dos veces** (`medir()`, spec §3.3), leo-stack #28. Cuando los tests vienen del hook, el validador lista los archivos de test del diff y no los corre. El motor decide en JS que están verdes si hay al menos uno y ninguno figura en `failing_test_files`. El atajo vale solo porque el hook corre la suite entera, y la spec ahora lo exige en el contrato. Sin hook, el paso queda como estaba. Sale de la misma autopsia de `cn-radar-al-dia-0921`: el paso del diff volvía a correr bats pesados que el hook ya había medido.
+
 ## 4.12.0 (2026-09-24)
 
 **El gate deja de medir de más y el review deja de aplicar lo que no le toca.** Sale de la autopsia de la corrida `cn-radar-al-dia-0921` (taller-erp, 2026-09-21), leo-stack #28. Esa corrida pasó más tiempo midiendo que construyendo, y los dos defectos que se colaron los metió el review fleet.
