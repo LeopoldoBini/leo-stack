@@ -21,7 +21,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 | La spec del motor: arquitectura, roles/tiers, gate ratchet, serializers, resume, review fleet | `docs/SPEC-v4-workflow-engine.md` |
 | El motor ejecutable | `workflows/prd-pipeline.js` |
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
-| Qué se siembra al adoptar el plugin en un repo | `commands/init.md` |
+| Qué se siembra al adoptar el plugin en un repo, incluida la regla de dependencias entre tickets (pocas waves anchas) | `commands/init.md` |
 | Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md` |
 | Cómo trabaja un agente sin nadie mirando, dentro o fuera del pipeline | `skills/desatendido/SKILL.md` |
 | El lado de lectura, corrible a mano antes de lanzar | `scripts/pipeline-read.sh` — spec §3.13b |
@@ -48,6 +48,8 @@ host-orchestrator/
 ├── scripts/
 │   ├── pipeline-read.sh                   # scope · check · intent (solo lectura)
 │   ├── test-pipeline-read.sh              # su test, contra fixtures/
+│   ├── gate-cache.sh                      # el hook con caché por árbol de git
+│   ├── test-gate-cache.sh                 # su test, contra un repo de juguete
 │   └── fixtures/                           # salida de gh ya filtrada, un caso por directorio
 └── agents/
     ├── parallel-implementer.md            # TDD vertical slice; nunca pushea

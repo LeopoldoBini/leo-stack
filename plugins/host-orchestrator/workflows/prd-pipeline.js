@@ -37,6 +37,8 @@ export const meta = {
 //                                         desde ${CLAUDE_PLUGIN_ROOT}),
 //   scopeInicial: <salida de `pipeline-read.sh scope` del pre-fetch de T0> | null,
 //   validateHook: 'scripts/wave-validate.sh' | null,
+//   gateCache: path absoluto de scripts/gate-cache.sh (lo resuelve el comando, igual
+//                                         que readCli; sin él el hook corre sin caché),
 //   testGlobs: ['**/*.test.*', ...],
 //   denyPaths: [],                        // ratchets/guards ortogonales (§3.10)
 //   requiredChecks: [],                   // checks de CI a esperar (vacío = no esperar)
@@ -136,6 +138,11 @@ if (!READ_CLI) {
   )
 }
 
+// Package manager (autopsia cn-radar-al-dia-0921, 2026-09-21): el applier corrió
+// `npm install` en un repo pnpm y coló dos package-lock.json. Una sola redacción para
+// todo agente que instala dependencias; el gate lo respalda con lockfiles_ajenos (§3.3).
+const REGLA_DEPS = `Dependencias: usá el package manager que indica el lockfile existente de cada carpeta (pnpm-lock.yaml → pnpm, yarn.lock → yarn, package-lock.json → npm, bun.lock/bun.lockb → bun). El único lockfile que se crea o se modifica es el de ese manager.`
+
 // ---------------------------------------------------------------------------
 // Schemas — los agentes reportan HECHOS y NÚMEROS; los veredictos son del script
 // ---------------------------------------------------------------------------
@@ -171,13 +178,15 @@ const SCOUT_SCHEMA = {
 
 const MEDICION_SCHEMA = {
   type: 'object',
-  required: ['status', 'metrics', 'tests_failed', 'failing_test_files'],
+  required: ['status', 'metrics', 'tests_failed', 'failing_test_files', 'lockfiles'],
   properties: {
     status: { type: 'string', enum: ['ok', 'error'] },
     error: { type: 'string' },
     metrics: { type: 'object', additionalProperties: { type: 'integer' } },
     tests_failed: { type: 'integer' },
     failing_test_files: { type: 'array', items: { type: 'string' } },
+    tests_fuente: { type: 'string', enum: ['hook', 'suite'], description: 'de dónde salieron tests_failed/failing_test_files' },
+    lockfiles: { type: 'array', items: { type: 'string' }, description: 'salida de git ls-files del paso de lockfiles, tal cual' },
     // mecánica del diff contra la rama integradora (solo cuando se pide):
     diff_toca_tests: { type: 'boolean' },
     tests_del_diff_verdes: { type: 'boolean' },
@@ -280,7 +289,10 @@ const JUICIO_SCHEMA = {
         },
       },
     },
-    rechazadas: { type: 'array', items: { type: 'object', properties: { titulo: { type: 'string' }, razon: { type: 'string' } } } },
+    rechazadas: {
+      type: 'array',
+      items: { type: 'object', properties: { titulo: { type: 'string' }, ubicacion: { type: 'string' }, razon: { type: 'string' } } },
+    },
     humano: { type: 'array', items: { type: 'object', properties: { titulo: { type: 'string' }, decision_necesaria: { type: 'string' } } } },
   },
 }
@@ -341,6 +353,8 @@ function gate(med, base, { exigirTests = true } = {}) {
     (f) => !(base.failing_test_files ?? []).includes(f)
   )
   if (nuevosRojos.length > 0) motivos.push(`tests antes-verdes ahora rojos: ${nuevosRojos.join(', ')}`)
+  const lockNuevos = (med.lockfiles_ajenos ?? []).filter((f) => !(base.lockfiles_ajenos ?? []).includes(f))
+  if (lockNuevos.length > 0) motivos.push(`lockfiles de package managers distintos en la misma carpeta: ${lockNuevos.join(', ')}`)
   if (exigirTests) {
     if (med.diff_toca_tests !== true) motivos.push('el diff no agrega ni modifica ningún test (anti "slice sin tests")')
     if (med.tests_del_diff_verdes !== true) motivos.push('tests tocados por el diff no están todos verdes')
@@ -349,28 +363,77 @@ function gate(med, base, { exigirTests = true } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Lockfiles ajenos (§3.3): dos package managers con lockfile trackeado en la misma
+// carpeta. El validator solo transporta `git ls-files`; la regla vive acá, en código.
+// Origen: autopsia cn-radar-al-dia-0921 (2026-09-21) — el applier corrió `npm install`
+// en un repo pnpm y coló dos package-lock.json que ningún gate numérico vio.
+// ---------------------------------------------------------------------------
+const MANAGER_DE_LOCKFILE = {
+  'package-lock.json': 'npm',
+  'yarn.lock': 'yarn',
+  'pnpm-lock.yaml': 'pnpm',
+  'bun.lockb': 'bun',
+  'bun.lock': 'bun',
+}
+function lockfilesAjenos(paths) {
+  const porCarpeta = {}
+  for (const p of paths ?? []) {
+    const corte = p.lastIndexOf('/') + 1
+    const manager = MANAGER_DE_LOCKFILE[p.slice(corte)]
+    if (manager) (porCarpeta[p.slice(0, corte)] ??= []).push({ p, manager })
+  }
+  return Object.values(porCarpeta)
+    .filter((l) => new Set(l.map((x) => x.manager)).size > 1)
+    .flatMap((l) => l.map((x) => x.p))
+    .sort()
+}
+const GLOBS_LOCKFILE = Object.keys(MANAGER_DE_LOCKFILE).map((n) => `'*${n}'`).join(' ')
+
+// Lo que el gate compara de una medición: el baseline de una wave o de la review.
+const aBaseline = (med) => ({
+  metrics: med.metrics,
+  tests_failed: med.tests_failed,
+  failing_test_files: med.failing_test_files,
+  lockfiles_ajenos: med.lockfiles_ajenos,
+})
+
+// ---------------------------------------------------------------------------
 // Validator (T económico, effort low): ejecuta y cuenta. Jamás opina. (§3.12.4)
+//
+// Autopsia cn-radar-al-dia-0921 (2026-09-21), dos correcciones:
+//  - CADA comando lleva su `cd <donde> &&`: el cwd de Bash se resetea entre llamadas.
+//    Un validator corrió bats desde la raíz del repo principal en vez del worktree del
+//    PR, midió un rojo que no existía y pisó el verde del hook: 2 bloqueos falsos, ~2 h.
+//  - Si el hook ya trae los tests (contrato §3.3), el validator los copia y NO corre
+//    ninguna suite: 17 de 37 validadores re-corrían tests pesados por su cuenta.
+// El hook pasa por gate-cache.sh (§3.3): el mismo árbol de git se mide una sola vez.
 // ---------------------------------------------------------------------------
 function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {}) {
+  const en = `cd ${donde} &&`
+  const hookCmd = A.gateCache ? `bash ${A.gateCache} ${A.validateHook}` : A.validateHook
   const hook = A.validateHook
-    ? `2. ${A.validateHook} --json   (timeout 420000)
-   → status:'error' → reportá su campo error y status:'error'; NO sigas.
-   → status:'ok' → copiá su objeto metrics tal cual.`
-    : `2. Autodetectá el runtime (lockfile) y corré el typecheck del repo (timeout 420000).
+    ? `2. ${en} ${hookCmd} --json   (timeout 420000)
+   → status distinto de 'ok' → reportá su campo error y status:'error'; NO sigas.
+   → status:'ok' → copiá su objeto metrics tal cual.
+   → si trae tests.failed (entero) y tests.failing_test_files (lista): tests_failed = tests.failed, failing_test_files = tests.failing_test_files tal cual, tests_fuente = 'hook', y SALTEÁ el paso 3: el hook ya corrió la suite.`
+    : `2. ${en} <typecheck del repo> — autodetectá el runtime por el lockfile (timeout 420000).
    → reportá metrics = {"typecheck_errors": <conteo>}; si el comando crashea sin errores parseables: status:'error' (un output vacío JAMÁS es 0).`
+  const suite = `3. ${A.validateHook ? "Solo si el paso 2 no te dio tests_fuente='hook': " : ''}${en} <suite de tests del repo> (timeout 420000) → tests_failed = conteo de tests fallidos, failing_test_files = paths de archivos de test con fallas, relativos a la raíz del repo; tests_fuente = 'suite'. Todo verde → 0 y lista vacía.`
   const diff = conDiff
-    ? `4. Mecánica del diff contra origin/${RAMA} (timeout 120000):
-   git fetch origin && git diff --name-only origin/${RAMA}...HEAD
+    ? `5. Mecánica del diff contra origin/${RAMA} (timeout 120000):
+   ${en} git fetch origin && git diff --name-only origin/${RAMA}...HEAD
    → diff_toca_tests = ¿algún archivo del diff matchea ${JSON.stringify(A.testGlobs)}?
-   → corré SOLO los archivos de test del diff → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
+   → ${en} <runner con SOLO los archivos de test del diff> → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
     : ''
-  const pre = pull ? `0. cd ${donde} && git fetch origin && git pull --ff-only origin ${RAMA}\n` : ''
+  const pre = pull ? `0. ${en} git fetch origin && git pull --ff-only origin ${RAMA}\n` : ''
   return llamar(
     (suf) => `Sos un MEDIDOR. Ejecutá EXACTAMENTE estos comandos en orden y reportá NÚMEROS por schema. No opines, no arregles nada, no toques ningún archivo.
+Cada comando empieza con \`${en}\`: escribilo así en CADA llamada a Bash, porque el directorio no persiste entre llamadas y un comando corrido desde otro lado mide otro árbol.
 
-${pre}1. cd ${donde}
+${pre}1. ${en} git rev-parse --show-toplevel   → tiene que ser ${donde} (o su ruta real); otro repo → status:'error'.
 ${hook}
-3. Corré la suite de tests del repo (timeout 420000) → tests_failed = conteo de tests fallidos, failing_test_files = paths de archivos de test con fallas. Todo verde → 0 y lista vacía.
+${suite}
+4. ${en} git ls-files -- ${GLOBS_LOCKFILE}   → lockfiles = una línea por entrada, tal cual (sin salida → lista vacía).
 ${diff}
 Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
     { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, schema: MEDICION_SCHEMA }
@@ -383,6 +446,7 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
     // Ya reincidió 2 veces (corrida 289-...-0720): normalizar SIEMPRE, en código.
     const KEYS = A.metricKeys ?? ['typecheck_errors']
     if (r && r.metrics) r.metrics = Object.fromEntries(KEYS.map((k) => [k, r.metrics[k]]))
+    if (r) r.lockfiles_ajenos = lockfilesAjenos(r.lockfiles)
     return r
   })
 }
@@ -456,7 +520,7 @@ const setup = await serializar(
 1. cd ${REPO} && git fetch origin
 2. CHECK: ¿existe origin/${RAMA}? → si no: git branch ${RAMA} origin/${BASE} && git push -u origin ${RAMA} (contexto audit: setup)
 3. CHECK: ¿existe el worktree local ${WT_INTEGRACION}? → si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}); si existe: dentro de él git pull --ff-only.
-4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente).`,
+4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente). ${REGLA_DEPS}`,
   'setup-rama',
   'Setup'
 )
@@ -584,12 +648,11 @@ ${refresh.detalle}`,
     log(`✖ baseline w${wave} inválido (${baseMed?.error ?? 'validator murió'}) — ABORT (medición inválida nunca es éxito)`)
     return { status: 'ABORT', fase: FASE, detalle: `baseline: ${baseMed?.error ?? 'validator murió'}`, waves: wavesReporte, bloqueadas }
   }
-  baseMetrics = {
-    metrics: baseMed.metrics,
-    tests_failed: baseMed.tests_failed,
-    failing_test_files: baseMed.failing_test_files,
-  }
-  log(`baseline w${wave}: ${Object.entries(baseMed.metrics).map(([k, v]) => `${k}=${v}`).join(' ')} testsRojos=${baseMed.tests_failed}`)
+  baseMetrics = aBaseline(baseMed)
+  log(
+    `baseline w${wave}: ${Object.entries(baseMed.metrics).map(([k, v]) => `${k}=${v}`).join(' ')} testsRojos=${baseMed.tests_failed}` +
+      ` (tests por ${baseMed.tests_fuente ?? '?'})${baseMed.lockfiles_ajenos.length ? ` lockfilesAjenos=${baseMed.lockfiles_ajenos.join(',')}` : ''}`
+  )
 
   const waveResumen = { wave, merges: [], impl: [] }
 
@@ -604,7 +667,7 @@ ${refresh.detalle}`,
    a. Si ya existe: reusalo con git pull.
    b. Si la branch ${iss.pr_branch} está checkouteada en OTRO worktree (git worktree list — típico leftover de un implementer): si ese worktree está limpio (git status --porcelain vacío) y su HEAD está contenido en origin/${iss.pr_branch}, removelo (git worktree remove --force + git worktree prune) y seguí; si tiene commits sin pushear o cambios sin commitear, NO lo toques → status 'blocked' con el detalle.
    c. git worktree add ${REPO}/.host-orchestrator/wt/pr-${prNum} ${iss.pr_branch}
-4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Instalá deps si hace falta.
+4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Instalá deps si hace falta. ${REGLA_DEPS}
 En detalle reportá el path del worktree.`,
       `prep-pr${prNum}`,
       FASE
@@ -751,7 +814,7 @@ async function implementarConGate(iss, FASE, deny) {
 
 PASO 0 (obligatorio — la base se toma del REMOTO, §3.11):
   git fetch origin && git checkout -B issue-${iss.number} origin/${RAMA}
-  Instalá dependencias si el repo lo necesita.
+  Instalá dependencias si el repo lo necesita. ${REGLA_DEPS}
 PASO 1: leé el contrato — es el BODY del ticket: gh issue view ${iss.number} (gh solo LECTURA: prohibida toda mutación remota).
 PASO 2: subí la escalera de intención: sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
   Te devuelve, del spec padre, el '## Out of Scope' (lo que NO tenés que construir) y el '## Testing Decisions' con los SEAMS pre-acordados —testeá ahí y no donde te resulte cómodo—, más el índice de ADRs y la rama del prototipo si hay. Abrí solo lo que tu slice consume.
@@ -941,7 +1004,9 @@ ${JSON.stringify(hallazgosCrudos, null, 1)}
 Tu deber:
 - Deduplicá solapados entre lentes.
 - Fallá cada uno: APLICAR / RECHAZAR / HUMANO (necesita decisión de Leo), razón de 1 línea.
-- Pesá: ¿es real (no especulativo)? ¿está en scope? ¿el riesgo del fix supera su beneficio? ¿contradice un ADR o CONTEXT.md?
+- UMBRAL de APLICAR — solo cuatro clases: bug real, seguridad, requisito del spec incumplido, contrato roto. Dentro de esas, pesá: ¿es real (no especulativo)? ¿está en scope? ¿el riesgo del fix supera su beneficio? ¿contradice un ADR o CONTEXT.md?
+- Debajo del umbral —estilo, refactor, nombres, docs, redundancias— va a RECHAZAR con una razón que empieza exactamente por "seguimiento:" y dice en una línea qué se sugiere: el PR final las lista como sugerencias de seguimiento. Los falsos positivos se rechazan con su razón, sin ese prefijo.
+- REGLA DURA — un fix que cambia la forma de una respuesta, un payload o un tipo compartido entre capas (sacar o renombrar un campo, cambiar un tipo) va a HUMANO, nunca a APLICAR, aunque el campo parezca redundante: el consumidor puede tener su propia copia de los tipos y ahí el typecheck no ve la rotura.
 - REGLA DURA — los findings de scope creep de la lente 'spec' (código que ningún ticket ni el spec pidieron) van a HUMANO, nunca a APLICAR: "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los del eje spec que señalan un requisito INCUMPLIDO sí pueden ir a APLICAR.
 - Ordená la lista APLICAR: independientes primero, dependientes al final.
 Vos NO editás código.${suf}`,
@@ -969,7 +1034,7 @@ Vos NO editás código.${suf}`,
         for (const [idx, tanda] of tandas.entries()) {
           const primera = idx === 0
           const paso0 = primera
-            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA}. Instalá deps si hace falta.`
+            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA}. Instalá deps si faltan (node_modules ausente).`
             : `PASO 0: cd ${apl.worktree} — worktree YA preparado por la tanda anterior (branch ${apl.branch}, ${apl.aplicadas} fix(es) ya aplicados y commiteados). NO hagas checkout, NO resetees, NO toques los commits previos.`
           const r = await llamar(
             (suf) => `Sos el APPLIER del review fleet — tanda ${idx + 1} de ${tandas.length}.${primera ? ' Trabajás en tu worktree AISLADO (tu cwd).' : ''}
@@ -977,6 +1042,7 @@ ${paso0}
 Aplicá EN ORDEN estos fixes aprobados por el juez (y SOLO estos — los de otras tandas NO son tuyos):
 ${tanda.map((f, i) => `${i + 1}. [${f.ubicacion}] ${f.titulo} → ${f.fix}`).join('\n')}
 Por cada fix: aplicá, corré build/tests del área tocada; si rompe, REVERTILO (no "fixes forward") y anotalo en falladas.
+${REGLA_DEPS} Trabajás con las dependencias ya instaladas: reinstalar corresponde solo cuando el fix mismo es de dependencias.
 Al final: git add -A && git commit. NO pushees, NO gh.
 
 DISCIPLINA DE CONTEXTO (tu contexto se re-envía entero en CADA turno: lo que arrastrás lo pagás N veces):
@@ -1019,15 +1085,10 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de EST
           // llega con baseMetrics null (corrida 16-17-0806) — recapturar acá.
           if (!baseMetrics) {
             const baseRev = await medir(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true })
-            if (baseRev?.status === 'ok')
-              baseMetrics = {
-                metrics: baseRev.metrics,
-                tests_failed: baseRev.tests_failed,
-                failing_test_files: baseRev.failing_test_files,
-              }
+            if (baseRev?.status === 'ok') baseMetrics = aBaseline(baseRev)
             else log(`⚠ baseline-review inválido (${baseRev?.error ?? 'validator murió'}) — gate de fixes solo con tests`)
           }
-          const gRev = gate(medRev, baseMetrics ?? { metrics: {}, tests_failed: 0, failing_test_files: [] }, { exigirTests: false })
+          const gRev = gate(medRev, baseMetrics ?? { metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles_ajenos: [] }, { exigirTests: false })
           if (gRev.pass) {
             const pubRev = await serializar(
               `Publicar y mergear los fixes del review (worktree ${apl.worktree}, branch ${apl.branch}):
@@ -1055,16 +1116,23 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de EST
 // ===========================================================================
 phase('Cierre')
 let prFinal = null
+// §3.7 — lo que el juez dejó debajo del umbral viaja al PR final como seguimiento, no se aplica.
+const seguimientos = (reviewReporte.juicio?.rechazadas ?? []).filter((r) => /^seguimiento:/i.test(r.razon ?? ''))
 if (allDone) {
   const issuesCierre = [...new Set(cerradas)]
   const bloqueCierre = issuesCierre.length
     ? `\n\nCLAVE — autocierre: el body DEBE incluir, en líneas propias, exactamente: ${issuesCierre.map((n) => `Closes #${n}`).join(', ')}. Son las issues cuyo PR por-issue fue contra la rama integradora (no la default), donde GitHub ignora el "Closes"; recién este PR final va a la default branch, así que ES el único lugar donde el autocierre surte efecto al mergearse. NO omitas ninguna ni uses otra redacción (nada de "issues cerradas: #N" en prosa — tiene que ser la keyword "Closes #N" que GitHub reconoce).`
     : ''
+  const bloqueSeguimiento = seguimientos.length
+    ? `\n\nEl body lleva además una sección "## Sugerencias de seguimiento" con estas líneas tal cual (el review las dejó debajo del umbral de aplicar: no se aplicaron):\n${seguimientos
+        .map((r) => `   - ${r.titulo}${r.ubicacion ? ` (${r.ubicacion})` : ''}: ${r.razon.replace(/^seguimiento:\s*/i, '')}`)
+        .join('\n')}`
+    : ''
   const cierre = await serializar(
     `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}.
 1. cd ${WT_INTEGRACION} && git pull --ff-only
 2. CHECK identidad de trabajo: ¿ya existe PR (abierto o mergeado) ${RAMA} → ${BASE}? → reportá su número ('ya_estaba'). Si ya existe y está ABIERTO pero su body NO trae los "Closes #" de abajo, editalo con gh pr edit para agregarlos.
-3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), nota del review fleet, y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}
+3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), nota del review fleet, y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}${bloqueSeguimiento}
 4. Sobre el PR (nuevo o 'ya_estaba', si está ABIERTO): gh pr comment <numero> --body "@coderabbitai review" — CodeRabbit skipea drafts y bases no-default por config, el comentario fuerza la review externa; el T0 triagea sus observaciones después (contexto audit: pr-final-coderabbit). Idempotencia: si el PR ya tiene un comentario "@coderabbitai review", no dupliques.`,
     'pr-final',
     'Cierre'
@@ -1084,6 +1152,7 @@ const reporte = {
   bloqueadas,
   pendientes,
   bugs_reales_para_issues: bugsReales,
+  seguimientos,
   para_leo: [
     ...(reviewReporte.juicio?.humano ?? []).map((h) => `[review] ${h.titulo}: ${h.decision_necesaria}`),
     ...bloqueadas,

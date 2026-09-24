@@ -2,6 +2,24 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.12.0 (2026-09-24)
+
+**El gate deja de medir de más y el review deja de aplicar lo que no le toca.** Sale de la autopsia de la corrida `cn-radar-al-dia-0921` (taller-erp, 2026-09-21), leo-stack #28. Esa corrida pasó más tiempo midiendo que construyendo, y los dos defectos que se colaron los metió el review fleet.
+
+**El validador confía en el hook** (`medir()`, spec §3.3). El hook dio verde en el worktree del PR. Después, el paso «corré la suite de tests del repo» llevó al validador a correr `bats` desde la raíz del repo principal, porque el cwd de Bash se resetea entre llamadas. Midió un rojo que no existía y pisó el verde: dos bloqueos falsos, unas 2 h. Ahora, si el hook trae `tests.failed` y `tests.failing_test_files`, el validador los copia y no corre ninguna suite. Si no los trae, corre la suite como antes. En los dos casos cada comando lleva su `cd <worktree> &&`. El contrato del hook queda en un solo lugar, la spec §3.3, y el comando apunta ahí.
+
+**Caché del gate por árbol de git** (`scripts/gate-cache.sh`, §3.3). El mismo árbol se medía hasta tres veces: gate de la issue, gate del PR sin cambios y baseline de la wave siguiente. La clave es `HEAD^{tree}` más los argumentos. Solo se cachea con el worktree limpio y con status ok, y la caché vive en el git-common-dir, así que la comparten todos los worktrees. El TTL es de 6 h (`HO_GATE_CACHE_TTL`) y `HO_GATE_CACHE=off` la apaga. El comando pasa el path en `args.gateCache`, igual que `readCli`. Se prueba con `scripts/test-gate-cache.sh`.
+
+**Lockfiles ajenos** (`gate()`, §3.3). El applier corrió `npm install` en un repo pnpm y coló dos `package-lock.json`. El validador ahora transporta `git ls-files` de los lockfiles y el motor calcula en JS cuáles conviven con los de otro manager en la misma carpeta. El gate falla si aparece uno que no estaba en el baseline. El JS del workflow sigue sin harness de tests: `lockfilesAjenos` y `gate` se verificaron extrayéndolas a mano.
+
+**Juez con umbral** (§3.7). APLICAR queda para bug real, seguridad, requisito del spec incumplido y contrato roto. Lo demás va a RECHAZAR con razón `seguimiento: …`, y el PR final lo lista como sugerencias de seguimiento. Regla dura nueva: un fix que cambia la forma de una respuesta, un payload o un tipo compartido entre capas va a HUMANO. En la corrida, el juez aprobó sacar un `id` «redundante» de una respuesta de API. El frontend tenía su propia copia de los tipos, `tsc` no lo vio y se rompió una pantalla.
+
+**Package manager** (§3.7). Implementer, applier y serializers que instalan usan el manager del lockfile existente y no crean el lockfile de otro. El applier reinstala solo si el fix es de dependencias.
+
+**Regla de tickets** en el bloque que siembra `/init`. Una dependencia existe solo si un ticket necesita el resultado del otro para funcionar o testearse. Tocar el mismo archivo o la misma página no es dependencia. En esa corrida, seis tickets quedaron en cinco waves seriales por dependencias de ese tipo.
+
+Se descartaron a propósito el applier en paralelo (§3.7c queda como está) y el timeout configurable.
+
 ## 4.11.0 (2026-08-25)
 
 **Sale del motor el rol que tiene prohibido opinar: nace `measurer`.** Corre el typecheck y la suite del repo, cuenta, y devuelve números con el comando que los produjo. No arregla, no diagnostica, no interpreta — y no tiene herramientas de escritura, así que la restricción es estructural y no una promesa del prompt.

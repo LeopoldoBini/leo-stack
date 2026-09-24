@@ -42,6 +42,8 @@ Este repo se opera con `cc-afk '<scope>' [+Nk]` — el launcher de `/host-orches
 
 **Al aprobar el breakdown de `/to-tickets`, clasificá cada slice.** Los que necesiten a un humano —decisión de producto, credencial o acceso que hay que gestionar, juicio visual, cambio irreversible— bajan a `ready-for-human`. El pipeline despacha solo lo que lleva `ready-for-agent`, y ese es el único momento en que alguien mira los slices de a uno: lo que pase de largo acá se despacha solo.
 
+**Una dependencia entre tickets existe solo si uno necesita el resultado del otro para funcionar o para testearse**; esa es la única que se declara con `Blocked by`. Dos tickets que tocan el mismo archivo o la misma página van en la misma wave: el merge-resolver concilia sus cambios. El breakdown está listo cuando entra en pocas waves anchas y cada `Blocked by` nombra el resultado que espera.
+
 **Contrato de este repo:** `.host-orchestrator/config.json` — base branch, hook de validación, y los overrides de modelo/tier/effort que el repo quiera apartar de los defaults del motor.
 
 ### Refrescar

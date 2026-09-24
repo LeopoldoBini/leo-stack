@@ -62,6 +62,10 @@ wave-validate.sh
 CONTEXT.md
 package.json
 tsconfig.json
+# lockfiles que el gate de lockfiles ajenos nombra (host-orchestrator §3.3)
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
 PROGRESS.md
 state.json
 .state.json
