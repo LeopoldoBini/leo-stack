@@ -89,6 +89,8 @@ No es prolijidad: es lo único que separa *hecho* de *dice que está hecho*.
 - Esto viaja en el encargo de cada agente que convocás, junto con qué evidencia tiene que traer. Un subagente que vuelve con "quedó andando" no terminó: mandalo de nuevo a buscar la salida.
 - La prueba dura, cuando aplica: **si borrás lo que hiciste, ¿la verificación se pone en rojo?** Si sigue en verde, no estaba verificando nada.
 
+**Lo de una vía no está terminado sin revisión:** `/mattpocock-skills:code-review` en ventana limpia y sus hallazgos arreglados, antes de declarar «Llegué».
+
 ### Entregado: donde sobreviva a esta sesión
 
 Esta conversación no es un entregable. Nadie la está mirando y puede que nadie la abra. Antes de cerrar el turno, lo que hiciste tiene que existir en un lugar durable: commit pusheado, PR abierto o mergeado, comentario en la issue, archivo en el repo.

@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.12.2 (2026-09-30)
+
+**`/desatendido`: lo de una vía no está terminado sin revisión.** Antes de declarar «Llegué», un cambio irreversible —datos reales, migraciones, avisos a terceros, deploy, la puerta única de datos— pasa por `/mattpocock-skills:code-review` en ventana limpia y sus hallazgos quedan arreglados. Lo reversible sigue terminando con su verificación. Es la misma regla que entró al `CLAUDE.md` global de Leo; acá vive como recordatorio en el punto donde el modo desatendido declara terminado, porque es el flujo que cierra solo sin segunda mirada. Origen: charlas de Matt Pocock (*Fixing the PR Bottleneck*) y James Cowling (*The End of Understanding*), destiladas en el acervo.
+
 ## 4.12.1 (2026-09-24)
 
 **Los tests del diff dejan de correrse dos veces** (`medir()`, spec §3.3), leo-stack #28. Cuando los tests vienen del hook, el validador lista los archivos de test del diff y no los corre. El motor decide en JS que están verdes si hay al menos uno y ninguno figura en `failing_test_files`. El atajo vale solo porque el hook corre la suite entera, y la spec ahora lo exige en el contrato. Sin hook, el paso queda como estaba. Sale de la misma autopsia de `cn-radar-al-dia-0921`: el paso del diff volvía a correr bats pesados que el hook ya había medido.
