@@ -1,0 +1,6 @@
+{
+  "navegador": {
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--viewport-size", "1280,800", "--output-dir", "${HOME}/.cache/probador"]
+  }
+}

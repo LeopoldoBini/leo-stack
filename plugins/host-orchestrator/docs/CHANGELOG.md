@@ -2,6 +2,18 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.13.0 (2026-10-04)
+
+**Nace el probador: un agente que usa la app de verdad, en un navegador, y dice qué vio.** Agente `tester` + skill `/probar <PR#|issue#|módulo> [--romper]` + receta de arranque por repo (bloque `probador` del config, spec §3.10b). Reporta criterio por criterio con tres estados —`visto-andar`, `visto-fallar`, `no-pude-probar`—, cada uno con su captura en disco. No hay «anda» global, y que la página cargue no cumple ningún criterio.
+
+Por qué: typecheck, tests y review fleet miran el código y nadie miraba la pantalla. En maro-web un botón dio error interno en cada click durante 35 días con todo en verde, y el bug de «Armar de cero» (#46 → #129) pasó con un test que lo nombraba. La evidencia externa dice lo mismo (Anthropic, *harness design for long-running apps*): el agente que se evalúa a sí mismo aprueba de más, y un evaluador aparte con Playwright es la palanca. Como `measurer`, el tester no tiene herramientas de edición: la independencia es estructural.
+
+**El error caro es la victoria falsa**, así que la duda se resuelve en `no-pude-probar`. Sin receta no adivina el arranque: un comando adivinado apunta a lo que la máquina tenga cableado, y en maro-web eso es el ambiente compartido `maro-qa`. Las precondiciones que el entorno local no deja armar por la UI se pueden armar por atajo, declarado. La acción y el resultado del criterio siempre van por la UI.
+
+**El navegador es del plugin** (`.mcp.json`, server `navegador`: `@playwright/mcp` pinneado, headless y aislado). Con el del plugin oficial, que abre ventana, las capturas daban timeout cuando la ventana quedaba tapada, que es también el caso AFK con la pantalla bloqueada. Aislado, además, cada corrida arranca sin el almacenamiento de la anterior.
+
+Piloto en maro-web (PR Cuenta-Norte/maro-web#205, con su receta: Convex local y desechable adentro del checkout). El tester distinguió roto de sano en #129 y dijo `no-pude-probar` en #184, cuyo mapa no carga fuera de `localhost:3000`. Modelo T2 justificado con esa medición (§3.15b). El contrato de salida para el motor queda escrito (§3.15): una pasada sobre la rama integradora después de la review y antes del PR final, que informa en `para_leo` y no frena. Engancharlo al motor es la tanda siguiente; `prd-pipeline.js` no cambió.
+
 ## 4.12.2 (2026-09-30)
 
 **`/desatendido`: lo de una vía no está terminado sin revisión.** Antes de declarar «Llegué», un cambio irreversible —datos reales, migraciones, avisos a terceros, deploy, la puerta única de datos— pasa por `/mattpocock-skills:code-review` en ventana limpia y sus hallazgos quedan arreglados. Lo reversible sigue terminando con su verificación. Es la misma regla que entró al `CLAUDE.md` global de Leo; acá vive como recordatorio en el punto donde el modo desatendido declara terminado, porque es el flujo que cierra solo sin segunda mirada. Origen: charlas de Matt Pocock (*Fixing the PR Bottleneck*) y James Cowling (*The End of Understanding*), destiladas en el acervo.

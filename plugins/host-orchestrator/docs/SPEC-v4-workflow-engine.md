@@ -219,6 +219,29 @@ Issues: label `ready-for-agent`, body del ticket como contrato, dependencias y s
 
 **Ratchets ortogonales como deny-lists (aprendizaje Piloto 1):** si el repo tiene otros guards/ratchets (ej. doctrine-guard, deuda declarada por ADR), sus dominios van en `deny_paths` y en el `excluye` de cada prompt — un agente que "mejora" código vedado por otro ratchet produce PRs que ese ratchet rechaza (pasó con routes-deuda ADR-0023: 2 PRs revertidos). Los ratchets del repo no se negocian entre sí: se excluyen por adelantado.
 
+### 3.10b Receta de arranque del probador (4.13.0)
+
+Bloque opcional `probador` de `.host-orchestrator/config.json`. Es lo único que el agente `tester` (§3.15) necesita para levantar la app y usarla; sin él, el tester no adivina: todo criterio sale `no-pude-probar` con razón `falta receta`. Un comando de arranque adivinado apunta a lo que la máquina del desarrollador tenga cableado, que puede ser un ambiente compartido o real.
+
+```
+"probador": {
+  "levantar": "<comando>",                // desde la raíz del checkout, foreground; el tester lo manda a background
+  "apagar":   "<comando>",                // opcional; sin él, el tester mata lo que escucha en sus puertos
+  "url":      "http://localhost:<puerto>",// único origen sobre el que el tester actúa
+  "lista":    "<path>",                   // responde 2xx cuando la app está lista (tope 300 s)
+  "login":    { "pagina": "<path>", "usuario": "<usuario>", "clave": "seed:<archivo> | vaultwarden:<ítem>" },
+  "datos":    "<comando>",                // opcional; siembra, si levantar no lo hace
+  "notas":    "<prosa>"                   // lo que el tester tiene que saber del entorno
+}
+```
+
+- **La receta apunta siempre a algo local y desechable.** Si un repo solo puede levantarse contra un ambiente compartido o real, no tiene receta todavía: se arregla el repo, no se afloja la regla.
+- **`login.clave` es una referencia, nunca el secreto.** `seed:<archivo>` = credencial de mentira commiteada en ese archivo. `vaultwarden:<ítem>` = el tester la saca con `bw get password` directo al campo, y si la bóveda está cerrada reporta `no-pude-probar` (`~/.claude/docs/secretos-vaultwarden.md`).
+Primer repo con receta: maro-web (Next + Convex), cuyo script levanta un backend Convex local adentro del checkout y lo siembra con el seed del repo.
+
+- **El script de arranque vive en el repo** (`levantar` es un comando, no lógica en JSON), así que solo existe en los commits que lo traen: un PR ramificado antes de la receta se prueba después de rebasearlo.
+- **El puerto lo fija la receta**, no el tester: si está ocupado por otra cosa, el tester no la toca y reporta `puerto ocupado`. Dos testers en paralelo sobre el mismo repo chocan; el motor corre uno por corrida.
+
 ### 3.11 Decisiones técnicas menores (CTO, cerradas en el grilling)
 
 - **Base de los worktrees:** el worktree de `isolation: 'worktree'` nace del HEAD de la sesión, que no está garantizado. Por eso el PRIMER paso obligatorio de cada implementer es `git fetch && git checkout -B issue-<N> origin/prd/<X>` — la base correcta se toma del remoto, independiente de dónde esté parada la sesión.
@@ -284,6 +307,45 @@ La fleet no tenía eje Spec. Entra **un solo** reviewer sobre el **diff integrad
 Las issues **DONE que ve cualquier scout** alimentan el `Closes #` del PR final, no sólo las que esta corrida publicó: un scope que llega ya terminado —un resume, un re-lanzamiento— dejaba el PR final sin autocierre.
 
 **Dos fricciones del serializer, resueltas de fábrica.** `gh pr merge --delete-branch` borra también la copia local y **falla si la branch sigue checkouteada en un worktree**: el worktree efímero del PR se suelta ANTES del merge, no después (el orden anterior costó dos resoluciones a mano). Y el merge-resolver commitea local por contrato: el camino del refresh ya tenía su push explícito, el del PR no, y la branch llegaba al merge con commits sin publicar. Ahora publica ahí mismo, y si el push falla el PR queda `merge-blocked` **conservando** el worktree, que es el único lugar donde vive esa resolución.
+
+### 3.15 El probador: usar la app antes del PR final (4.13.0 — contrato; el motor todavía no lo invoca)
+
+Typecheck, tests y review fleet miran el código. Ninguno usa la pantalla, y por ahí se escapan los defectos caros: en maro-web un botón dio error interno en cada click durante 35 días con todo en verde. El agente que se verifica a sí mismo aprueba de más; un evaluador aparte, con navegador, es la palanca (Anthropic, *harness design for long-running apps*). El rol es `agents/tester.md`: no escribe código y no tiene herramientas de edición; reporta lo que vio, criterio por criterio.
+
+**Dónde va en el motor (segunda tanda):** una pasada, sobre la rama integradora, **después de la review fleet y antes del PR final**. El checkout es un worktree efímero de `prd/X` ya con los fixes de la review; los criterios son los de aceptación de las issues DONE de la corrida, tal como están en sus bodies. Tier T2, effort `medium` (ver §3.15b). **Informa, no frena:** el PR final sale igual; lo que dé `visto-fallar` o `no-pude-probar` va a `para_leo` y al cuerpo del PR. Ningún `if` del motor decide sobre estos estados — el gate sigue siendo numérico (§3.3).
+
+**Contrato de salida** (schema del `agent()`):
+
+```
+{
+  arranque: { ok: boolean, comando: string, segundos: number, url: string, log_tail: string },
+  criterios: [{
+    n: number, criterio: string,
+    estado: 'visto-andar' | 'visto-fallar' | 'no-pude-probar',
+    pasos: string[], visto: string,          // texto en pantalla citado, request/consola si hubo error
+    por_que: string,                         // obligatorio en no-pude-probar: dónde se frenó
+    captura: string                          // path absoluto bajo ~/.cache/probador/<corrida>/
+  }],
+  fuera_de_criterios: string[],              // 5xx, errores de consola, layout roto que ningún criterio cubría
+  apagado: { ok: boolean, detalle: string }
+}
+```
+
+**El navegador es del plugin**, no el plugin oficial `playwright`: `.mcp.json` declara el server `navegador` (`@playwright/mcp` pinneado, `--headless --isolated`, salida en `~/.cache/probador/`). Headless porque con la ventana tapada —o la pantalla bloqueada, que es el caso AFK— Chrome deja de pintar y cada captura da timeout: pasó en el piloto, cuatro capturas seguidas. Aislado porque cada corrida arranca sin el almacenamiento de la anterior, y sin pelear el perfil con el navegador que Leo use en su sesión.
+
+No hay veredicto global a propósito: «anda» no es un estado. Uso del motor: cada criterio no-`visto-andar` es una línea de `para_leo` con su captura; la tabla entera va al PR final bajo «Probado en la app»; `arranque.ok = false` es una sola línea (`el probador no levantó la app: …`).
+
+#### 3.15b Modelo del tester
+
+**T2 (sonnet), effort `medium`** — modelo mínimo suficiente, medido contra el error caro, que acá es la victoria falsa. Piloto 2026-10-04 en maro-web, sobre bugs que realmente se escaparon (typecheck, tests y review en verde):
+
+| caso | commit | estado del tester | ¿correcto? |
+|---|---|---|---|
+| #129 «Armar de cero» no vaciaba el carrito | `9568e91` (antes del fix) | visto-fallar — la oferta se va, el carrito queda con 5 productos | sí |
+| ídem | `cff8999` (main) | visto-andar — oferta fuera, carrito vacío, todo por la UI | sí |
+| #184 aviso del Pin | `960a8c0` (antes del fix) | no-pude-probar — el mapa no carga en el puerto de la receta | sí: no inventó |
+
+En la primera pasada sobre el commit roto, sin regla de precondiciones, también eligió `no-pude-probar` antes que fabricar estado: ese es el sesgo que se quiere. El commit roto de #129 tenía un test de «Armar de cero» que pasaba con el bug adentro. Cada corrida tardó de 80 a 140 s (arranque de la app: 12–17 s) y costó USD 0,24–0,37 en el tester. Escalar a T1 queda para cuando aparezca un `visto-andar` falso; cuatro corridas son poca muestra, y la decisión se revisa con la primera corrida del motor.
 
 ## 4. Migración v3 → v4
 
