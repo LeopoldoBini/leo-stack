@@ -2,6 +2,12 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.14.0 (2026-10-09)
+
+**Fable sale de la rotación: T0 pasa a Opus, y los roles de juicio suben a `xhigh`.** Default de `model_map` ahora `{T0:'opus', T1:'opus', T2:'sonnet', T3:'haiku'}`; T0 y T1 comparten modelo y los diferencia el effort. Defaults de effort del motor: resolver, particionador, reviewer y judge de `high` a `xhigh`.
+
+Por qué: Opus 5.5 ($4/$20) iguala a Fable 5.1 ($10/$50) en la curva costo/inteligencia, así que Fable queda afuera hasta que salga Fable 5.5. Subir el effort de los roles de juicio es barato: la autopsia de 2026-07-27 (spec §3.1b) midió que el output pesa ~6% del costo; el resto es contexto releído.
+
 ## 4.13.0 (2026-10-04)
 
 **Nace el probador: un agente que usa la app de verdad, en un navegador, y dice qué vio.** Agente `tester` + skill `/probar <PR#|issue#|módulo> [--romper]` + receta de arranque por repo (bloque `probador` del config, spec §3.10b). Reporta criterio por criterio con tres estados —`visto-andar`, `visto-fallar`, `no-pude-probar`—, cada uno con su captura en disco. No hay «anda» global, y que la página cargue no cumple ningún criterio.

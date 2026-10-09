@@ -73,7 +73,7 @@ Los comandos standalone `/parallel-implement-wave` y `/merge-orchestrate` se ret
 
 - `gh` CLI autenticado (PRs, issues, labels).
 - Repo git con la base branch trackeando un remoto.
-- Acceso a los modelos que nombre el `model_map` del repo (default: fable/opus/sonnet/haiku).
+- Acceso a los modelos que nombre el `model_map` del repo (default: opus/opus/sonnet/haiku).
 - Para `/probar`: Node con `npx` (el navegador del tester es `@playwright/mcp`, que trae su Chromium) y la receta del repo.
 - Issues con label `ready-for-agent` (o el que declare el config) como scope de entrada.
 

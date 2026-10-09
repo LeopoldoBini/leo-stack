@@ -83,17 +83,18 @@ const T = A.tiers
 // (output total por corrida: 187k-457k; cache read: 47M-215M). Bajar effort mueve ~6%.
 // Por eso: los roles EJECUTORES (serializer: corre gh/git check-then-act) van a 'low'
 // —no razonan, ejecutan—, y los roles de JUICIO (reviewer/judge/particionador/resolver)
-// se quedan en 'high': ahí el error es asimétrico (un falso negativo del reviewer no lo
-// recupera nadie después, el gate es puramente numérico) y su output pesa ~6% del total.
+// van a 'xhigh' (2026-10-09): ahí el error es asimétrico (un falso negativo del reviewer no
+// lo recupera nadie después, el gate es puramente numérico) y como el output pesa ~6% del
+// total, subirles el effort es barato.
 const EFFORT_DEFAULT = {
   scout: 'low',
   validator: 'low',
   serializer: 'low',
   implementer: 'medium',
-  resolver: 'high',
-  particionador: 'high',
-  reviewer: 'high',
-  judge: 'high',
+  resolver: 'xhigh',
+  particionador: 'xhigh',
+  reviewer: 'xhigh',
+  judge: 'xhigh',
   applier: 'medium',
 }
 const E = { ...EFFORT_DEFAULT, ...(A.efforts ?? {}) }

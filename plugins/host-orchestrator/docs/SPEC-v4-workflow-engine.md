@@ -66,8 +66,8 @@ Script JS (determinístico, corre en background):
 | **fixer mecánico** | T2 | medium | remediación bien especificada y verificable por gate (tipos, lint, codemods) — NO features | ídem implementer |
 | **validator** | T2–T3 | low | ejecuta `wave-validate.sh --json` (o autodetect) y reporta NÚMEROS via schema | decidir si pasa — eso es del script |
 | **serializer** (git-officer) | T1–T2 | medium | TODA mutación remota: push, `gh pr create/merge`, branch ops. Idempotente (check-then-act) | implementar, juzgar código |
-| **merge-resolver** | T0–T1 | high | resolver conflictos con intent packet; 5 criterios de no-regresión (sin cambios vs v3) | mergear él mismo (reporta; el serializer ejecuta) |
-| **reviewers/judge** (§3.7) | T0–T1 | high | revisar el diff integrado / fallar cada hallazgo | aplicar (eso es de appliers T1–T2) |
+| **merge-resolver** | T0–T1 | xhigh | resolver conflictos con intent packet; 5 criterios de no-regresión (sin cambios vs v3) | mergear él mismo (reporta; el serializer ejecuta) |
+| **reviewers/judge** (§3.7) | T0–T1 | xhigh | revisar el diff integrado / fallar cada hallazgo | aplicar (eso es de appliers T1–T2) |
 
 **Regla dura:** ningún `agent()` sin modelo explícito (resuelto desde el tier via `model_map`). La lección del host-sin-pinnear muere acá: el "host" ahora es código, no tiene modelo.
 
@@ -83,7 +83,7 @@ El effort es configurable por rol (`role_efforts` → `args.efforts`) y por issu
 |---|---|---|
 | scout, validator, **serializer** | `low` | ejecutan (gh/git/tests) y reportan números; no hay juicio que comprar |
 | implementer, applier | `medium` | escriben código bajo gate numérico; el retry cubre el resto |
-| resolver, particionador, reviewer, judge | `high` | **error asimétrico**: el gate es puramente numérico (§3.3), así que un falso negativo del reviewer no lo recupera nadie aguas abajo |
+| resolver, particionador, reviewer, judge | `xhigh` | **error asimétrico**: el gate es puramente numérico (§3.3), así que un falso negativo del reviewer no lo recupera nadie aguas abajo; y como el output pesa ~6% del costo (autopsia abajo), subirles el effort es barato |
 
 **Autopsia de 4 corridas reales (2026-07-27, App.SaltaCompra — método: `usage` por agente en `~/.claude/projects/*/subagents/workflows/wf_*/agent-*.jsonl`, clasificado por prompt):**
 
@@ -207,7 +207,7 @@ El applier aplica los fixes del juez en tandas de `applier_chunk` (default 4). L
   "max_parallel": 6,
   "runtime": "node|bun|...",            // hint para el validator autodetect
   "test_globs": ["**/*.test.*", "**/*.spec.*"],  // qué es "archivo de test" para el gate (§3.3)
-  "model_map": { "T0": "fable", "T1": "opus", "T2": "sonnet", "T3": "haiku" },  // ÚNICO lugar nominal a modelos
+  "model_map": { "T0": "opus", "T1": "opus", "T2": "sonnet", "T3": "haiku" },  // ÚNICO lugar nominal a modelos
   "role_tiers": {},                     // override por rol, p.ej. {"implementer": "T2"} para repos triviales
   "labels": { "ready": "ready-for-agent", "agent_pr": "afk-agent-pr" },
   "deny_paths": []                      // rutas VEDADAS a los agentes: ratchets/guards ortogonales del repo
