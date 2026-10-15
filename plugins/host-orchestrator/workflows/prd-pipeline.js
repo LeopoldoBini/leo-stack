@@ -920,7 +920,7 @@ if (allDone) {
     const part = await llamar(
       (suf) => `Sos el PARTICIONADOR de un review fleet. SOLO LEÉS.
 1. cd ${WT_INTEGRACION} && git fetch origin && git pull --ff-only
-2. Estudiá el diff INTEGRADO completo: git diff origin/${BASE}...HEAD — como un todo, no PR por PR: mapa de módulos tocados, seams nuevos, contratos cambiados, estado compartido. Leé CONTEXT.md y docs/adr/ si existen.
+2. Estudiá el diff INTEGRADO completo: git diff origin/${BASE}...HEAD — como un todo, no PR por PR: mapa de módulos tocados, seams nuevos, contratos cambiados, estado compartido. Leé GLOSSARY.md (o CONTEXT.md si el repo no migró) y docs/adr/ si existen.
 3. Particioná en unidades de review = superficies cohesivas del estado FINAL (módulo + sus seams, ~≤1.5k líneas relevantes por unidad, máx 6). Las fronteras salen del dominio y la estructura del repo, NUNCA de cómo se despachó el trabajo (waves/issues son artefactos de scheduling).
 Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}`,
       { label: 'review:particion', phase: 'Review', model: M[T.reviewer], effort: E.particionador, schema: PARTICION_SCHEMA }
@@ -984,7 +984,7 @@ No revises arquitectura ni bugs: otros reviewers cubren eso y duplicarlos ensuci
 1. cd ${WT_INTEGRACION} (NO modifiques NADA)
 2. Base del review — SOLO tu alcance:
    ${t.alcance}
-   Leé CONTEXT.md/ADRs si existen, y abrí archivos fuera de tu alcance SOLO si necesitás
+   Leé GLOSSARY.md (o CONTEXT.md)/ADRs si existen, y abrí archivos fuera de tu alcance SOLO si necesitás
    entender un contrato que tu diff consume (rangos, no archivos enteros).
 3. Tu alcance y lente: ${t.prompt}
 Reportá findings ESTRUCTURADOS (título · file:line · severidad alta/media/baja · por qué importa · fix propuesto). Sin prosa. Lista vacía si no hay nada real — no inventes hallazgos para justificarte.${suf}`,

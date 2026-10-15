@@ -10,7 +10,7 @@ El criterio de admisión es el eje de interdependencia: un plugin entra acá si 
 |---|---|
 | **host-orchestrator** | El motor del pipeline AFK: `/prd-pipeline` orquesta el despacho de waves, la review fleet y el merge sobre el host, como Workflow determinista. Núcleo del stack. |
 | **interface-lens** | Juzgar, diseñar y construir interfaces con psicología UX y brújula ética. |
-| **memory-flow** | `/revisar_memoria`: barrido batch de la memoria por-archivo, con propuestas de graduación a `CLAUDE.md` / `CONTEXT.md`. |
+| **memory-flow** | `/revisar_memoria`: barrido batch de la memoria por-archivo, con propuestas de graduación a `CLAUDE.md` / `GLOSSARY.md`. |
 | **review-flow** | `/analizar`: checkpoint pre-ejecución para dictados por voz e instrucciones ambiguas. |
 | **yt-transcript** | Transcripción de videos de YouTube a un archivo central, con resumen en español y timestamps anclados. |
 

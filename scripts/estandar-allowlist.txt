@@ -60,6 +60,7 @@ sandcastle-probe-resources
 scripts/wave-validate.sh
 wave-validate.sh
 CONTEXT.md
+GLOSSARY.md
 package.json
 tsconfig.json
 # lockfiles que el gate de lockfiles ajenos nombra (host-orchestrator §3.3)

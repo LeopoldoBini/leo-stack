@@ -91,7 +91,7 @@ When a resource the brief depends on is unreachable, that is your finding — re
 ## 6. Read in this order before you build
 
 1. `CLAUDE.md` at the repo root, plus any in the directories your work touches — house rules beat your defaults.
-2. `CONTEXT.md` if it exists — the project's vocabulary, so your names match theirs.
+2. `GLOSSARY.md` if it exists (or `CONTEXT.md` in repos not yet migrated) — the project's vocabulary, so your names match theirs.
 3. The test suite nearest to what you are changing. It tells you the framework, the fixtures, the seams the codebase already agreed on, and the run command. Test at the seams that are already there; seams you invent break when someone else's change lands.
 4. The code the brief points at. Anchor to what the brief names and follow references outward from there — reading the whole repo costs turns and buys nothing.
 

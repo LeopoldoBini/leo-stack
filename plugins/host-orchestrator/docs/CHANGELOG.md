@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.14.1 (2026-10-15)
+
+**El glosario de dominio se llama `GLOSSARY.md`** (convención de mattpocock-skills 1.3). Implementadores, particionador y reviewers leen `GLOSSARY.md` y caen a `CONTEXT.md` en repos que todavía no migraron.
+
 ## 4.14.0 (2026-10-09)
 
 **Fable sale de la rotación: T0 pasa a Opus, y los roles de juicio suben a `xhigh`.** Default de `model_map` ahora `{T0:'opus', T1:'opus', T2:'sonnet', T3:'haiku'}`; T0 y T1 comparten modelo y los diferencia el effort. Defaults de effort del motor: resolver, particionador, reviewer y judge de `high` a `xhigh`.

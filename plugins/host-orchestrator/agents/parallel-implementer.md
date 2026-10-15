@@ -113,7 +113,7 @@ If completing the ticket seems to require crossing this boundary, that's informa
 ## 6. Reading order (do this first, in this order)
 
 1. `CLAUDE.md` in repo root and any sub-directories relevant to the slice (e.g., `app/CLAUDE.md`, `services/foo/CLAUDE.md`).
-2. `CONTEXT.md` if present (project domain vocabulary).
+2. `GLOSSARY.md` if present (project domain vocabulary; fall back to `CONTEXT.md` in repos not yet migrated).
 3. **The ticket body** — the contract. The host names the issue in your prompt.
 4. **The intent ladder**, via the command the host hands you (`pipeline-read.sh intent <issue>`). It answers, from the parent spec, the two questions your ticket alone cannot:
    - `testing_decisions` → the **pre-agreed seams**. Test there. Seams you invent are the ones that break when someone else's slice lands.

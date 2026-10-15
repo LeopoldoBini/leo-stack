@@ -81,6 +81,6 @@ Dos o tres líneas para Leo: cuál de los tres caminos tomó `CLAUDE.md` (creado
 ## Qué NO siembra
 
 - **El bloque de pipeline de `engineering-workflow`** — existía en 3 de 15 repos y los 3 estaban podridos. El orden canónico de trabajo lo publica `mattpocock-skills` con `/setup-matt-pocock-skills` (tracker, labels, domain docs); acá solo vive lo que el pipeline AFK agrega encima.
-- **`CONTEXT.md`** — lo crea `mattpocock-skills:domain-modeling`, que ya es su dueño.
+- **`GLOSSARY.md`** — lo crea `mattpocock-skills:domain-modeling`, que ya es su dueño.
 - **Labels, milestones ni issues** — los crea Leo; este comando escribe dos archivos y nada remoto.
 - **`scripts/wave-validate.sh`** — el hook de validación es del repo: qué mide y cómo lo mide no lo puede adivinar el plugin. Contrato de salida (`--json`): spec §3.3.
