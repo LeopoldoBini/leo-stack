@@ -951,12 +951,40 @@ ${prep?.detalle ?? 'sin detalle'}`,
     waveResumen.merges.push({ pr: prNum, resultado: mrg?.status ?? 'serializer murió', motivo: mrg?.detalle })
   }
 
+  // --- Post-merge: lo habilitado se recalcula después de mergear ------------
+  // El scout de arriba es una foto de ANTES de los merges: lo que un merge de esta
+  // wave destrabó salía recién en la siguiente, y cada eslabón de una cadena costaba
+  // dos waves. Si entró algo, otro scout (transporte, barato) y el baseline de lo
+  // que quedó en la integradora —el árbol del último PR mergeado, ya medido en su
+  // gate pre-merge: la memoria lo devuelve sin re-medir—.
+  let fotoImpl = buckets
+  if (waveResumen.merges.some((m) => m.resultado === 'ok' || m.resultado === 'ya_estaba')) {
+    const post = await scoutear(`w${wave}-post`, FASE)
+    if (post) {
+      registrarScout(post)
+      fotoImpl = {}
+      for (const i of post.issues) (fotoImpl[i.bucket] ??= []).push(i)
+      inReviewUltimo = (fotoImpl.IN_REVIEW ?? []).map((i) => `#${i.number} IN_REVIEW (PR #${i.pr_number ?? '?'}): ${i.detalle ?? i.title} — requiere intervención humana antes de re-correr`)
+      if (post.all_done) {
+        wavesReporte.push(waveResumen)
+        allDone = true
+        log(`✔ scope completo tras los merges de la wave ${wave} — pasando a Review`)
+        break
+      }
+      if ((fotoImpl.IMPLEMENTABLE ?? []).length) {
+        const basePost = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}-post`, { pull: true })
+        if (basePost?.status === 'ok') baseMetrics = aBaseline(basePost)
+        else log(`⚠ baseline post-merge w${wave} inválido (${basePost?.error ?? 'validator murió'}) — los gates de esta wave comparan contra el de antes de los merges`)
+      }
+    } else log(`⚠ scout post-merge w${wave} murió — se implementa con la foto de antes de los merges`)
+  }
+
   // --- Impl wave: fan-out implementers en worktrees (cap maxParallel) -------
   // §3.16: lo que el scout ofrece y ya se intentó en esta corrida sin un hecho
   // nuevo no se despacha: se marca para Leo, con su worktree conservado. El
   // reparto se decide ANTES de marcar: marcar deja la entrada como "bloqueada
   // por el motor", que es justo lo que habilita un re-despacho si Leo la destraba.
-  const ofrecidas = buckets.IMPLEMENTABLE ?? []
+  const ofrecidas = fotoImpl.IMPLEMENTABLE ?? []
   const vuelven = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'para_leo')
   const implementables = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'despachar').slice(0, A.maxParallel)
   for (const iss of vuelven) {
@@ -1122,9 +1150,10 @@ Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, 
 // ===========================================================================
 // GUARDIA DE CIERRE (§3.14) — agotar el tope no puede tirar la corrida entera
 //
-// Cada eslabón serial de una cadena cuesta DOS waves (implementar + mergear), así
-// que un scope de 5 eslabones con maxWaves=10 consume el tope justo al terminar de
-// implementar. Con el `all_done` decidiéndose sólo al ABRIR una wave, ese final —
+// Hasta 4.14 cada eslabón serial costaba DOS waves (implementar + mergear) y un scope
+// de 5 eslabones con maxWaves=10 consumía el tope justo al terminar de implementar.
+// Desde 4.15 el scout post-merge despacha el eslabón siguiente en la misma wave (una
+// wave por eslabón), pero el tope sigue pudiendo caer en la última. Con el `all_done` decidiéndose sólo al ABRIR una wave, ese final —
 // 7 issues DONE, sin review fleet y sin PR final — era el peor posible: todo el
 // gasto hecho y nada del cierre (corrida prd-0030-0818, destrabada a mano con
 // resumeFromRunId + maxWaves=14). Un scout más, el rol más barato, distingue
@@ -1141,7 +1170,7 @@ if (!allDone && wavesAgotadas) {
     cortePorWaves = true
     const falta = (verif?.issues ?? []).filter((i) => i.bucket !== 'DONE' && i.bucket !== 'SPEC').length
     pendientes.push(
-      `tope de waves alcanzado con ${falta || 'varias'} issue(s) sin cerrar — relanzá con maxWaves ≥ 2 × eslabones_seriales + 2`
+      `tope de waves alcanzado con ${falta || 'varias'} issue(s) sin cerrar — relanzá con maxWaves ≥ eslabones_seriales + 2`
     )
     log(`■ tope de waves alcanzado y el scope sigue incompleto (${falta} pendiente(s)) — sin review ni PR final`)
   }

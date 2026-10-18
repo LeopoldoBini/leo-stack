@@ -16,7 +16,7 @@ Compone `args` y lanza **`Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflow
 
 - **Scope** (requerido, posicional): `milestone:<name>` | `label:<label>` | `parent:#N` | `#42,#43,...`
 - **`+<N>k` / `+<N>m`** (opcional): hard cap de tokens **de output** de la corrida (el motor no ve el costo ponderado: el output fue ~1/5 del costo en octubre, spec §3.12) — va al `args.budgetTotal` (fuente primaria; la directiva del turno es solo fallback, demostró ser frágil). **Sin `+Nk`, la corrida va SIN tope** (default desde v4.0.8) — pasalo solo cuando quieras limitarla deliberadamente.
-- **`--max-waves=N`** (default 8) — **piso: `2 × eslabones_seriales + 2`**. Un eslabón de la cadena de dependencias cuesta DOS waves (implementar + mergear), y la profundidad de la cadena sale de los `blocked_by` de la salida de `scope`: 5 eslabones necesitan 12, no 8. Quedarse corto cuesta una corrida entera de trabajo re-lanzada con `resumeFromRunId`.
+- **`--max-waves=N`** (default 8) — **piso: `eslabones_seriales + 2`**. Un eslabón de la cadena de dependencias cuesta una wave (se mergea el anterior y, en la misma wave, se despacha el que destrabó), y la profundidad de la cadena sale de los `blocked_by` de la salida de `scope`: 7 eslabones necesitan 9, no 8. Quedarse corto cuesta una corrida entera de trabajo re-lanzada con `resumeFromRunId`.
 - **`--max-parallel=N`** (default 6, techo 8), **`--dry-run`** (mostrar plan + args sin lanzar).
 
 ## Pasos (vos, la sesión T0)

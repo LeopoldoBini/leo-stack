@@ -218,3 +218,16 @@ test('scout, validator y serializer salen como operador (solo Bash); el implemen
   for (const c of mecanicos) assert.equal(c.agentType, 'host-orchestrator:operador', c.label)
   for (const c of conLabel(llamadas, /^implementer:/)) assert.equal(c.agentType, 'host-orchestrator:parallel-implementer')
 })
+
+// ── Ítem 7: lo habilitado se recalcula después de mergear ──
+
+test('cadena 1←2←3: cada eslabón cuesta una wave, no dos (el scout corre también después de los merges)', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] }, 3: { deps: [2] } } })
+  const { resultado, llamadas } = await correrMotor({ mundo, args: { maxParallel: 1, maxWaves: 4 } })
+  assert.equal(resultado.status, 'DONE', `quedó ${resultado.status}: ${resultado.pendientes}`)
+  assert.ok(resultado.waves.length <= 4, `waves: ${resultado.waves.length}`)
+  const merge1 = llamadas.findIndex((c) => c.label === 'serializer:merge-pr500')
+  const impl2 = llamadas.findIndex((c) => c.label === 'implementer:#2')
+  const fase = (i) => llamadas[i].phase
+  assert.equal(fase(impl2), fase(merge1), '#2 se despacha en la misma wave en que entra #1')
+})
