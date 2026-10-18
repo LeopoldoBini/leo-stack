@@ -54,6 +54,8 @@ host-orchestrator/
 ├── scripts/
 │   ├── pipeline-read.sh                   # scope · check · intent (solo lectura)
 │   ├── test-pipeline-read.sh              # su test, contra fixtures/
+│   ├── deps-al-dia.sh                     # reinstala si el lockfile cambió respecto de lo instalado
+│   ├── test-deps-al-dia.sh                # su test, con package managers falsos
 │   ├── gate-cache.sh                      # el hook con caché por árbol de git
 │   ├── test-gate-cache.sh                 # su test, contra un repo de juguete
 │   └── fixtures/                           # salida de gh ya filtrada, un caso por directorio

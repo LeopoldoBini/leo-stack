@@ -158,3 +158,16 @@ test('medición inválida: se re-mide una vez antes de frenar (baseline, PR y ga
   assert.equal(conLabel(llamadas, /^retry:/).length, 0, 'una medición rota no re-despacha al implementer')
   assert.ok(!mundo.prs.get(500).labels.has('merge-blocked'))
 })
+
+// ── Ítem 3: dependencias iguales al lockfile antes de trabajar o medir ──
+
+test('deps al día: el Setup, el implementer y cada medición corren deps-al-dia sobre su árbol', async () => {
+  const mundo = crearMundo({ issues: { 1: {} } })
+  const { llamadas } = await correrMotor({ mundo })
+  const deps = /bash \/plugin\/scripts\/deps-al-dia\.sh /
+  assert.match(conLabel(llamadas, /^serializer:setup-rama$/)[0].prompt, deps)
+  assert.match(conLabel(llamadas, /^implementer:#1$/)[0].prompt, deps)
+  const validators = conLabel(llamadas, /^validator:/)
+  assert.ok(validators.length >= 2)
+  for (const v of validators) assert.match(v.prompt, /1b\. cd \S+ && bash \/plugin\/scripts\/deps-al-dia\.sh \./, v.label)
+})

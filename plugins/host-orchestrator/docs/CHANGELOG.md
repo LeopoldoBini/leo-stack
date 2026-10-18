@@ -10,6 +10,8 @@ Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, de
 
 **Worktrees del motor en `wf_*`** (spec §3.10c). La integradora y el gate pre-merge medían en `.host-orchestrator/wt/<rama>` y `wt/pr-<N>`; Radar aísla su base de tests solo para carpetas `wf_*`/`agent-*`, así que esas mediciones caían en la base compartida y una volteó a otra: rojo falso, cadena trabada 10 h. Ahora son `wt/wf_<rama>` y `wt/wf_pr-<N>`, y el contrato queda escrito en la spec y en el bloque que siembra `/init`. **Una medición inválida se re-mide una vez antes de frenar** —baseline, gate pre-merge, gate de la issue (que antes re-despachaba al implementer) y fixes del review.
 
+**Dependencias iguales al lockfile** (`scripts/deps-al-dia.sh`, spec §3.3). El Setup instalaba solo si faltaba `node_modules` y el baseline no reinstalaba nunca: un merge que cambiaba el lockfile dejaba la integradora midiendo con dependencias viejas. Ahora el Setup, el implementer, el applier y cada medición corren el script, que reinstala congelado con el manager del lockfile solo si el lockfile cambió respecto de la marca de la última instalación.
+
 **El motor tiene tests.** `tests/simulador.mjs` corre `prd-pipeline.js` tal cual contra un GitHub y un git de mentira, con agentes falsos por label; las reglas puras viven en un bloque marcado que el test evalúa solo. `node --test 'plugins/host-orchestrator/tests/*.test.mjs'`.
 
 ## 4.14.1 (2026-10-15)

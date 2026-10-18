@@ -291,6 +291,15 @@ if (!READ_CLI) {
   )
 }
 
+// Los demás scripts del plugin viven al lado del CLI de lectura: un solo path
+// resuelto por el comando alcanza para todos.
+const SCRIPTS = READ_CLI.replace(/\/[^/]*$/, '')
+// §3.3 — deps al día: reinstala (congelado, con el manager del lockfile) solo si
+// el lockfile cambió respecto de lo instalado. Lo corre todo el que va a trabajar
+// o medir sobre un árbol: el Setup, el implementer, el applier y el validator.
+const DEPS_CLI = `${SCRIPTS}/deps-al-dia.sh`
+const DEPS = (donde) => `bash ${DEPS_CLI} ${donde}`
+
 // Package manager (autopsia cn-radar-al-dia-0921, 2026-09-21): el applier corrió
 // `npm install` en un repo pnpm y coló dos package-lock.json. Una sola redacción para
 // todo agente que instala dependencias; el gate lo respalda con lockfiles_ajenos (§3.3).
@@ -532,10 +541,11 @@ function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {})
     : ''
   const pre = pull ? `0. ${en} git fetch origin && git pull --ff-only origin ${RAMA}\n` : ''
   return llamar(
-    (suf) => `Sos un MEDIDOR. Ejecutá EXACTAMENTE estos comandos en orden y reportá NÚMEROS por schema. No opines, no arregles nada, no toques ningún archivo.
+    (suf) => `Sos un MEDIDOR. Ejecutá EXACTAMENTE estos comandos en orden y reportá NÚMEROS por schema. No opines, no arregles nada, no edites ningún archivo (el paso 1b instala dependencias: eso sí).
 Cada comando empieza con \`${en}\`: escribilo así en CADA llamada a Bash, porque el directorio no persiste entre llamadas y un comando corrido desde otro lado mide otro árbol.
 
 ${pre}1. ${en} git rev-parse --show-toplevel   → tiene que ser ${donde} (o su ruta real); otro repo → status:'error'.
+1b. ${en} ${DEPS('.')}   (timeout 600000) → pone las dependencias iguales al lockfile; reinstala solo si cambió. Es lo único que este paso escribe, y solo en node_modules. Sale ≠ 0 → status:'error' con su salida en 'error'.
 ${hook}
 ${suite}
 4. ${en} git ls-files -- ${GLOBS_LOCKFILE}   → lockfiles = una línea por entrada, tal cual (sin salida → lista vacía).
@@ -645,7 +655,7 @@ const setup = await serializar(
 3. CHECK: ¿existe el worktree local ${WT_INTEGRACION}? → si existe: dentro de él git pull --ff-only. Si no:
    a. Si la branch ${RAMA} ya está checkouteada en OTRO worktree (git worktree list; típico: el path de versiones anteriores del motor, sin el prefijo wf_), movelo: git worktree move <ese path> ${WT_INTEGRACION}.
    b. Si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}).
-4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente). ${REGLA_DEPS}
+4. ${DEPS(WT_INTEGRACION)}   → deja las dependencias iguales al lockfile (reinstala solo si cambió). Sale ≠ 0 → status 'blocked' con su salida.
 5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.`,
   'setup-rama',
   'Setup',
@@ -811,7 +821,7 @@ ${refresh.detalle}`,
    a. Si ya existe: reusalo con git pull.
    b. Si la branch ${iss.pr_branch} está checkouteada en OTRO worktree (git worktree list — típico leftover de un implementer): si ese worktree está limpio (git status --porcelain vacío) y su HEAD está contenido en origin/${iss.pr_branch}, removelo (git worktree remove --force + git worktree prune) y seguí; si tiene commits sin pushear o cambios sin commitear, NO lo toques → status 'blocked' con el detalle.
    c. git worktree add ${wtPr} ${iss.pr_branch}
-4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Instalá deps si hace falta. ${REGLA_DEPS}
+4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Las dependencias las pone al día el medidor.
 En detalle reportá el path del worktree.`,
       `prep-pr${prNum}`,
       FASE
@@ -994,7 +1004,8 @@ async function implementarConGate(iss, FASE, deny) {
 
 PASO 0 (obligatorio — la base se toma del REMOTO, §3.11):
   git fetch origin && git checkout -B issue-${iss.number} origin/${RAMA}
-  Instalá dependencias si el repo lo necesita. ${REGLA_DEPS}
+  ${DEPS('.')}   (deja las dependencias iguales al lockfile; reinstala solo si cambió)
+  Si tu slice cambia dependencias: ${REGLA_DEPS}
 PASO 1: leé el contrato — es el BODY del ticket: gh issue view ${iss.number} (gh solo LECTURA: prohibida toda mutación remota).
 PASO 2: subí la escalera de intención: sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
   Te devuelve, del spec padre, el '## Out of Scope' (lo que NO tenés que construir) y el '## Testing Decisions' con los SEAMS pre-acordados —testeá ahí y no donde te resulte cómodo—, más el índice de ADRs y la rama del prototipo si hay. Abrí solo lo que tu slice consume.
@@ -1214,7 +1225,7 @@ Vos NO editás código.${suf}`,
         for (const [idx, tanda] of tandas.entries()) {
           const primera = idx === 0
           const paso0 = primera
-            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA}. Instalá deps si faltan (node_modules ausente).`
+            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA} && ${DEPS('.')}`
             : `PASO 0: cd ${apl.worktree} — worktree YA preparado por la tanda anterior (branch ${apl.branch}, ${apl.aplicadas} fix(es) ya aplicados y commiteados). NO hagas checkout, NO resetees, NO toques los commits previos.`
           const r = await llamar(
             (suf) => `Sos el APPLIER del review fleet — tanda ${idx + 1} de ${tandas.length}.${primera ? ' Trabajás en tu worktree AISLADO (tu cwd).' : ''}
