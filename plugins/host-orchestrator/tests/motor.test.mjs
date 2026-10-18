@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { nucleoPuro, correrMotor, crearMundo, conLabel } from './simulador.mjs'
 
-const P = nucleoPuro(['gate', 'lockfilesAjenos', 'aBaseline', 'tocaVedados', 'vetoDeWorkflows', 'crearRegistro'])
+const P = nucleoPuro(['gate', 'lockfilesAjenos', 'aBaseline', 'tocaVedados', 'vetoDeWorkflows', 'crearRegistro', 'crearMemoria'])
 
 const BASE = { metrics: { typecheck_errors: 3 }, tests_failed: 1, failing_test_files: ['a.test.ts'], lockfiles_ajenos: [] }
 const med = (o = {}) => ({ status: 'ok', metrics: { typecheck_errors: 3 }, tests_failed: 1, failing_test_files: ['a.test.ts'], lockfiles_ajenos: [], diff_toca_tests: true, tests_del_diff_verdes: true, ...o })
@@ -170,4 +170,40 @@ test('deps al día: el Setup, el implementer y cada medición corren deps-al-dia
   const validators = conLabel(llamadas, /^validator:/)
   assert.ok(validators.length >= 2)
   for (const v of validators) assert.match(v.prompt, /1b\. cd \S+ && bash \/plugin\/scripts\/deps-al-dia\.sh \./, v.label)
+})
+
+// ── Ítem 4: cada árbol se mide una sola vez por corrida ──
+
+const ARBOL = 'a'.repeat(40)
+test('memoria: guarda solo mediciones ok de un árbol limpio y completa las ya medidas', () => {
+  const m = P.crearMemoria()
+  const medida = { status: 'ok', arbol: ARBOL, limpio: true, metrics: { typecheck_errors: 2 }, tests_failed: 1, failing_test_files: ['a.test.ts'], tests_fuente: 'suite', lockfiles: ['package-lock.json'] }
+  assert.equal(m.guardar({ ...medida, status: 'error' }), false)
+  assert.equal(m.guardar({ ...medida, limpio: false }), false, 'con cambios sin commitear el árbol no describe lo medido')
+  assert.equal(m.guardar({ ...medida, arbol: 'HEAD' }), false, 'un id que no es de git no se guarda')
+  assert.equal(m.guardar({ ...medida, ya_medido: true }), false)
+  assert.equal(m.guardar(medida), true)
+  assert.deepEqual(m.arboles(), [ARBOL])
+  const c = m.completar({ status: 'ok', ya_medido: true, arbol: ARBOL, limpio: true, metrics: {}, tests_failed: 0, failing_test_files: [], tests_del_diff: ['x.test.ts'] })
+  assert.equal(c.tests_failed, 1)
+  assert.deepEqual(c.failing_test_files, ['a.test.ts'])
+  assert.deepEqual(c.tests_del_diff, ['x.test.ts'], 'lo del diff es de esta medición, no del árbol')
+  assert.equal(m.completar({ ya_medido: true, arbol: 'b'.repeat(40), limpio: true }), null)
+})
+
+test('cadena 1←2←3: cada árbol se mide una vez (gate de la issue → pre-merge → baseline siguiente)', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] }, 3: { deps: [2] } } })
+  const { resultado } = await correrMotor({ mundo, args: { maxParallel: 1 } })
+  assert.equal(resultado.status, 'DONE')
+  const arboles = mundo.mediciones.map((m) => m.arbol)
+  assert.equal(new Set(arboles).size, arboles.length, `un árbol se midió dos veces: ${JSON.stringify(mundo.mediciones.map((m) => [m.etiqueta, m.issues]))}`)
+  assert.equal(arboles.length, 4, 'el baseline vacío y el árbol de cada issue')
+})
+
+test('un medidor que dice "ya medido" sobre un árbol que el motor no tiene no cuenta como medición', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { yaMedidoFalso: (etiqueta, intento) => etiqueta === 'i1' && intento === 1 } })
+  const { resultado, logs } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE')
+  assert.ok(mundo.mediciones.some((m) => m.etiqueta === 'i1'), 'el árbol de la issue se midió de verdad')
+  assert.ok(logs.some((l) => /i1 inválida.*no tiene/.test(l)))
 })

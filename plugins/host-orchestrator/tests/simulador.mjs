@@ -13,6 +13,7 @@
 //   correrMotor(...)     corre el motor entero contra un mundo (crearMundo).
 
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const MOTOR = fileURLToPath(new URL('../workflows/prd-pipeline.js', import.meta.url))
@@ -116,7 +117,18 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
   const veces = {} // contador por clave
   const contar = (k) => (veces[k] = (veces[k] ?? 0) + 1)
   let proximoPr = 500
-  const arbol = (set) => 'T' + ([...set].sort((a, b) => a - b).join('.') || '0')
+  // Árboles y commits como los de git (40 hex). El conjunto de issues que
+  // contiene un árbol se recupera por el mapa inverso.
+  const conjuntoDe = new Map()
+  const sha = (x) => createHash('sha1').update(x).digest('hex')
+  const arbol = (set) => {
+    const lista = [...new Set(set)].sort((a, b) => a - b)
+    const id = sha(`arbol:${lista.join(',')}`)
+    conjuntoDe.set(id, lista)
+    conjuntoDe.set(sha(`commit:${id}`), lista)
+    return id
+  }
+  const commitDe = (id) => sha(`commit:${id}`)
   const arbolIntegracion = () => arbol(mergeadas)
   const prDeIssue = (n) => [...prs.entries()].find(([, p]) => p.issue === n)
   const mergeada = (n) => prDeIssue(n)?.[1].merged === true
@@ -152,13 +164,14 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     const wt = esIntegracion(donde) ? { arbol: arbolIntegracion() } : wts.get(donde)
     if (!wt) return { status: 'error', error: `worktree desconocido: ${donde}`, metrics: {}, tests_failed: -1, failing_test_files: [], lockfiles: [] }
     const conocidos = (prompt.match(/Árboles ya medidos en esta corrida: ([^\n]*)/)?.[1] ?? '').split(/\s+/).filter(Boolean)
-    const base = { arbol: wt.arbol, limpio: true, commit: `c-${wt.arbol}` }
+    const base = { arbol: wt.arbol, limpio: true, commit: commitDe(wt.arbol) }
     const diff = /Mecánica del diff/.test(prompt)
       ? { diff_toca_tests: true, tests_del_diff: ['src/x.test.ts'], archivos_del_diff: ['src/x.ts', 'src/x.test.ts', ...(wt.toca ?? [])], ...(hook ? {} : { tests_del_diff_verdes: true }) }
       : {}
     if (conocidos.includes(wt.arbol)) return { status: 'ok', ya_medido: true, ...base, metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
-    mundo.mediciones.push({ etiqueta, arbol: wt.arbol })
-    const rojos = [...new Set((wt.arbol.slice(1).split('.').map(Number)).flatMap((n) => fallas.rojo?.(n) ?? []))]
+    if (fallas.yaMedidoFalso?.(etiqueta, intento)) return { status: 'ok', ya_medido: true, ...base, metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
+    mundo.mediciones.push({ etiqueta, arbol: wt.arbol, issues: conjuntoDe.get(wt.arbol) })
+    const rojos = [...new Set(conjuntoDe.get(wt.arbol).flatMap((n) => fallas.rojo?.(n) ?? []))]
     return {
       status: 'ok', ...base, metrics: { typecheck_errors: 0 }, tests_failed: rojos.length, failing_test_files: rojos,
       tests_fuente: hook ? 'hook' : 'suite', lockfiles: ['package-lock.json'], ...diff,
@@ -174,7 +187,7 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     if (f?.bloqueado) return { worktree: `/repo/.claude/worktrees/wf_sim-${n}-${intento}`, branch: `issue-${n}`, resumen: 'no pude', bloqueado: f.bloqueado }
     const path = `/repo/.claude/worktrees/wf_sim-${n}-${intento}`
     const base = prompt.match(/git checkout -B issue-\d+ (\S+)/)?.[1]
-    const desde = base && base.startsWith('c-T') ? base.slice(3).split('.').map(Number).filter(Boolean) : mergeadas
+    const desde = conjuntoDe.get(base) ?? mergeadas
     wts.set(path, { arbol: arbol([...desde, n]), issue: n, toca: f?.toca })
     return { worktree: path, branch: `issue-${n}`, resumen: `implementé #${n}` }
   }
@@ -201,8 +214,7 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       const pr = prs.get(num)
       if (pr.merged) return { status: 'ya_estaba', detalle: 'ya mergeado' }
       const path = prompt.match(/Worktree efímero en (\S+)/)?.[1]
-      const conRama = new Set([...pr.arbol.slice(1).split('.').map(Number).filter(Boolean), ...mergeadas])
-      pr.arbol = arbol(conRama)
+      pr.arbol = arbol([...conjuntoDe.get(pr.arbol), ...mergeadas])
       wts.set(path, { arbol: pr.arbol, issue: pr.issue })
       return { status: 'ok', detalle: path }
     }

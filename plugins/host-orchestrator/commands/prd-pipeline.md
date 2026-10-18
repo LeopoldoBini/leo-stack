@@ -56,7 +56,6 @@ Defaults del config (todos opcionales): `base_branch` (default: default branch d
 - **`budgetTotal`**: del `+Nk` del comando si vino; **sin `+Nk` → `budgetTotal: null` (SIN tope)**. Decisión de Leo (22-jul, corrida PRD-0019: el tope +1000k cortó la corrida a 58 tokens del `minBudgetWave` dejando 2 slices y la review fleet afuera — un tope "razonable" corta donde no debe). NO le propongas un tope ni frenes esperando confirmación: lanzá sin cap e informale el costo estimado de referencia (`~150k × issues + 300k`, la regla vieja de 100k/issue quedó corta) para que sepa qué esperar. Con `+Nk` explícito el comportamiento no cambia: hard cap — es la forma deliberada de Leo de limitar una corrida.
 - **`ts`**: el `date -Iseconds` del pre-flight.
 - **`readCli`**: `${CLAUDE_PLUGIN_ROOT}/scripts/pipeline-read.sh` **resuelto a path absoluto** — el script del Workflow no ve variables de entorno del plugin. Los demás scripts del plugin (`deps-al-dia.sh`) el motor los resuelve al lado de ese.
-- **`gateCache`**: `${CLAUDE_PLUGIN_ROOT}/scripts/gate-cache.sh`, resuelto a path absoluto por la misma razón. El validator corre el hook a través de él, y así un árbol de git ya medido no se vuelve a medir (§3.3). Sin él, el hook corre sin caché.
 - **`scopeInicial`**: la salida de `pipeline-read.sh scope` de acá abajo, ya parseada a objeto. El motor la reusa en la wave 1 en vez de despachar un agente; `null` la saltea sin romper nada.
 
 ### 3 — Confirmar y lanzar
@@ -75,7 +74,7 @@ Confirmado (o corrida AFK ya autorizada por el prompt inicial):
 Workflow({
   scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/prd-pipeline.js",
   args: { ts, runLabel, repo: <pwd>, scope, base, rama, models, tiers, issueTiers,
-          efforts, issueEfforts, applierChunk, readCli, gateCache, scopeInicial,
+          efforts, issueEfforts, applierChunk, readCli, scopeInicial,
           validateHook, testGlobs, denyPaths, requiredChecks, labels,
           maxParallel, maxWaves, budgetTotal, minBudgetWave: 300000 }
 })

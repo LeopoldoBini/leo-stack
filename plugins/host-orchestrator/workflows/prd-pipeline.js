@@ -37,8 +37,6 @@ export const meta = {
 //                                         desde ${CLAUDE_PLUGIN_ROOT}),
 //   scopeInicial: <salida de `pipeline-read.sh scope` del pre-fetch de T0> | null,
 //   validateHook: 'scripts/wave-validate.sh' | null,
-//   gateCache: path absoluto de scripts/gate-cache.sh (lo resuelve el comando, igual
-//                                         que readCli; sin él el hook corre sin caché),
 //   testGlobs: ['**/*.test.*', ...],
 //   denyPaths: [],                        // ratchets/guards ortogonales (§3.10)
 //   requiredChecks: [],                   // checks de CI a esperar (vacío = no esperar)
@@ -191,6 +189,33 @@ const aBaseline = (med) => ({
   lockfiles_ajenos: med.lockfiles_ajenos,
 })
 
+// Memoria de mediciones por árbol de git (§3.3). Medir depende del contenido del
+// árbol, no del commit ni del worktree: el mismo árbol se medía hasta tres veces
+// (gate de la issue, gate pre-merge, baseline siguiente) y en 1017b 27 de 42
+// mediciones repitieron uno ya medido (~160 min). Se guarda la parte que es del
+// árbol; lo del diff (tests_del_diff, archivos_del_diff) es de cada medición.
+const PARTE_DEL_ARBOL = ['metrics', 'tests_failed', 'failing_test_files', 'tests_fuente', 'lockfiles']
+const esIdDeGit = (x) => typeof x === 'string' && /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(x)
+function crearMemoria() {
+  const m = new Map()
+  return {
+    arboles: () => [...m.keys()],
+    // Solo status ok sobre un árbol limpio: con cambios sin commitear el árbol no
+    // describe lo que se midió, y una medición rota se repite, nunca se recuerda.
+    guardar(med) {
+      if (med?.status !== 'ok' || med.ya_medido || med.limpio !== true || !esIdDeGit(med.arbol)) return false
+      m.set(med.arbol, JSON.stringify(Object.fromEntries(PARTE_DEL_ARBOL.map((k) => [k, med[k]]))))
+      return true
+    },
+    // Una respuesta `ya_medido` + lo guardado de ese árbol. null si el motor no
+    // lo tiene: el medidor se equivocó, y eso es una medición inválida.
+    completar(med) {
+      if (!m.has(med?.arbol) || med.limpio !== true) return null
+      return { ...med, ...JSON.parse(m.get(med.arbol)) }
+    },
+  }
+}
+
 // Carpeta de un worktree que crea el motor (§3.10c). El prefijo `wf_` es el
 // contrato con el repo: los worktrees de los agentes de Claude Code ya caen en
 // `wf_*`/`agent-*`, y un repo que aísla recursos compartidos por worktree (la base
@@ -340,9 +365,13 @@ const SCOUT_SCHEMA = {
 
 const MEDICION_SCHEMA = {
   type: 'object',
-  required: ['status', 'metrics', 'tests_failed', 'failing_test_files', 'lockfiles'],
+  required: ['status', 'metrics', 'tests_failed', 'failing_test_files', 'lockfiles', 'arbol', 'limpio'],
   properties: {
     status: { type: 'string', enum: ['ok', 'error'] },
+    arbol: { type: 'string', description: 'salida de git rev-parse HEAD^{tree}, tal cual' },
+    commit: { type: 'string', description: 'salida de git rev-parse HEAD, tal cual' },
+    limpio: { type: 'boolean', description: '¿git status --porcelain salió vacío?' },
+    ya_medido: { type: 'boolean', description: 'true solo si el árbol estaba en la lista de ya medidos y salteaste la medición' },
     error: { type: 'string' },
     metrics: { type: 'object', additionalProperties: { type: 'integer' } },
     tests_failed: { type: 'integer' },
@@ -520,13 +549,23 @@ async function llamar(makePrompt, opts, intentos = 2) {
 //    PR, midió un rojo que no existía y pisó el verde del hook: 2 bloqueos falsos, ~2 h.
 //  - Si el hook ya trae los tests (contrato §3.3), el validator los copia y NO corre
 //    ninguna suite: 17 de 37 validadores re-corrían tests pesados por su cuenta.
-// El hook pasa por gate-cache.sh (§3.3): el mismo árbol de git se mide una sola vez.
+// Cada árbol se mide UNA vez por corrida (§3.3): el validator reporta su id, el motor
+// guarda la medición y, si el árbol ya está en la memoria, el validator saltea la
+// medición y el motor completa con lo guardado.
 // ---------------------------------------------------------------------------
 function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {}) {
   const en = `cd ${donde} &&`
-  const hookCmd = A.gateCache ? `bash ${A.gateCache} ${A.validateHook}` : A.validateHook
+  const conocidos = memoria.arboles()
+  // Con el árbol ya medido solo queda lo del diff; las dependencias hacen falta
+  // únicamente si hay que correr los tests del diff (sin hook).
+  const yaMedido = conocidos.length
+    ? `\n   Árboles ya medidos en esta corrida: ${conocidos.join(' ')}
+   → si arbol está en esa lista Y limpio es true: ya_medido = true, metrics = {}, tests_failed = 0, failing_test_files = [], lockfiles = [], y SALTEÁ ${
+        conDiff && !A.validateHook ? 'los pasos 2 a 4 (el 1b sí, el 5 sí)' : conDiff ? 'los pasos 1b a 4 (el 5 sí)' : 'todos los pasos que siguen'
+      }: el motor ya tiene esa medición. Si no está en la lista, seguí normal.`
+    : ''
   const hook = A.validateHook
-    ? `2. ${en} ${hookCmd} --json   (timeout 420000)
+    ? `2. ${en} ${A.validateHook} --json   (timeout 420000)
    → status distinto de 'ok' → reportá su campo error y status:'error'; NO sigas.
    → status:'ok' → copiá su objeto metrics tal cual.
    → si trae tests.failed (entero) y tests.failing_test_files (lista): tests_failed = tests.failed, failing_test_files = tests.failing_test_files tal cual, tests_fuente = 'hook', y SALTEÁ el paso 3: el hook ya corrió la suite.`
@@ -544,7 +583,8 @@ function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {})
     (suf) => `Sos un MEDIDOR. Ejecutá EXACTAMENTE estos comandos en orden y reportá NÚMEROS por schema. No opines, no arregles nada, no edites ningún archivo (el paso 1b instala dependencias: eso sí).
 Cada comando empieza con \`${en}\`: escribilo así en CADA llamada a Bash, porque el directorio no persiste entre llamadas y un comando corrido desde otro lado mide otro árbol.
 
-${pre}1. ${en} git rev-parse --show-toplevel   → tiene que ser ${donde} (o su ruta real); otro repo → status:'error'.
+${pre}1. ${en} git rev-parse --show-toplevel HEAD 'HEAD^{tree}' && git status --porcelain | head -5
+   → la primera línea tiene que ser ${donde} (o su ruta real); otro repo → status:'error'. commit = la segunda línea y arbol = la tercera, copiadas TAL CUAL; limpio = ¿no salió nada después?${yaMedido}
 1b. ${en} ${DEPS('.')}   (timeout 600000) → pone las dependencias iguales al lockfile; reinstala solo si cambió. Es lo único que este paso escribe, y solo en node_modules. Sale ≠ 0 → status:'error' con su salida en 'error'.
 ${hook}
 ${suite}
@@ -552,7 +592,11 @@ ${suite}
 ${diff}
 Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
     { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, schema: MEDICION_SCHEMA }
-  ).then((r) => {
+  ).then((crudo) => {
+    let r = crudo
+    if (r?.ya_medido) {
+      r = memoria.completar(r) ?? { ...r, status: 'error', error: `el medidor dijo "ya medido" sobre el árbol ${r.arbol}, que el motor no tiene` }
+    }
     // §3.3 — el contrato de metrics es CERRADO: solo las claves de la whitelist
     // (args.metricKeys, default typecheck_errors), CON o SIN hook. Un validator que
     // sobre-reporta claves extra (p.ej. los conteos de tests del paso 3 mezclados en
@@ -569,6 +613,8 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
       const delDiff = r.tests_del_diff ?? []
       r.tests_del_diff_verdes = delDiff.length > 0 && !delDiff.some((f) => (r.failing_test_files ?? []).includes(f))
     }
+    if (r && memoria.guardar(r)) log(`medición ${etiqueta}: árbol ${r.arbol.slice(0, 12)} guardado (${memoria.arboles().length} en memoria)`)
+    else if (crudo?.ya_medido && r?.status === 'ok') log(`medición ${etiqueta}: árbol ${r.arbol.slice(0, 12)} ya medido — sin re-medir`)
     return r
   })
 }
@@ -671,6 +717,7 @@ const vetoPush = vetoDeWorkflows(setup.token)
 const VEDADOS = vetoPush.vedar ? [...new Set([...A.denyPaths, VETO_WORKFLOWS])] : A.denyPaths
 log(`push: ${vetoPush.motivo}${vetoPush.vedar ? ` → ${VETO_WORKFLOWS} vedado` : ''}`)
 const registro = crearRegistro()
+const memoria = crearMemoria()
 
 // ===========================================================================
 // LOOP DE WAVES
