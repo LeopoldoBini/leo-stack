@@ -16,6 +16,8 @@ Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, de
 
 **Agente liviano para lo mecánico** (`agents/operador.md`, spec §3.11). Scout, validator y serializer salían como agente genérico y arrancaban con ~42K tokens de prompt (devbox), cargando tools que no usan. Ahora son `operador`, con `tools: Bash` solo. Medido en la Mac (`claude -p --agent`, checkout de Radar): 12,4K de arranque contra 33,1K de la sesión con todas las tools.
 
+**El freno de presupuesto, dicho como es** (spec §3.12, punto 6). `budget.spent()` cuenta solo output, y `agent()` no le devuelve al script el usage de cada agente, así que el motor no puede frenar por costo ponderado. En las corridas de octubre el output fue el 17–26 % del costo: el `+Nk` es un tope de output, no de plata. Queda escrito en la spec, en el comando y en el motor, cuyo comentario decía que el output pesaba ~6 %. El reporte cambia `tokens_spent` por `tokens_output`.
+
 **El motor tiene tests.** `tests/simulador.mjs` corre `prd-pipeline.js` tal cual contra un GitHub y un git de mentira, con agentes falsos por label; las reglas puras viven en un bloque marcado que el test evalúa solo. `node --test 'plugins/host-orchestrator/tests/*.test.mjs'`.
 
 ## 4.14.1 (2026-10-15)

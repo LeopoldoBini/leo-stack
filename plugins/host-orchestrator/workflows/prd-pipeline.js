@@ -254,14 +254,15 @@ const M = A.models
 const T = A.tiers
 
 // §3.1b — EFFORT por rol (config `role_efforts` → args.efforts; override por issue en
-// args.issueEfforts). Los defaults salen de la autopsia de 4 corridas reales (2026-07-27):
-// el costo de una corrida NO escala con el effort sino con turnos × contexto acumulado
-// (output total por corrida: 187k-457k; cache read: 47M-215M). Bajar effort mueve ~6%.
-// Por eso: los roles EJECUTORES (serializer: corre gh/git check-then-act) van a 'low'
-// —no razonan, ejecutan—, y los roles de JUICIO (reviewer/judge/particionador/resolver)
-// van a 'xhigh' (2026-10-09): ahí el error es asimétrico (un falso negativo del reviewer no
-// lo recupera nadie después, el gate es puramente numérico) y como el output pesa ~6% del
-// total, subirles el effort es barato.
+// args.issueEfforts). El costo de una corrida escala con turnos × contexto acumulado,
+// no con el effort: la mayor parte es contexto releído (caché). El output —lo único que
+// mueve el effort— pesó ~6% en la autopsia de julio (App.SaltaCompra, sin review en xhigh)
+// y 17–26% del costo ponderado en las corridas de octubre sobre Radar, con la revisión en
+// xhigh. Por eso: los roles EJECUTORES (scout/validator/serializer: corren comandos) van a
+// 'low' —no razonan, ejecutan—, y los roles de JUICIO (reviewer/judge/particionador/
+// resolver) van a 'xhigh' (2026-10-09): ahí el error es asimétrico (un falso negativo del
+// reviewer no lo recupera nadie después, el gate es puramente numérico), y subirles el
+// effort encarece el output, que es la parte chica de la cuenta.
 const EFFORT_DEFAULT = {
   scout: 'low',
   validator: 'low',
@@ -282,7 +283,12 @@ const WT_INTEGRACION = carpetaDeWorktree(REPO, RAMA)
 const wtDePr = (prNum) => carpetaDeWorktree(REPO, `pr-${prNum}`)
 const AUDIT_LOG = `${REPO}/.host-orchestrator/waves/${A.runLabel}.log`
 
-// §3.12.3 — budget por args (fuente primaria), fallback directiva, log de fuente
+// §3.12.3 — budget por args (fuente primaria), fallback directiva, log de fuente.
+// OJO, el freno ve solo OUTPUT: `budget.spent()` cuenta tokens de output de la sesión y
+// sus workflows, y `agent()` no le devuelve al script el usage de cada agente (ni input
+// ni caché), así que el motor no puede frenar por costo ponderado. En las corridas de
+// octubre el output fue 17–26% del costo: un tope `+800k` deja pasar ~4-5 veces eso en
+// costo real. El tope es un freno de output, no de plata (§3.12, punto 6).
 const BUDGET_TOTAL = A.budgetTotal ?? budget.total
 const restante = () => (BUDGET_TOTAL ? Math.max(0, BUDGET_TOTAL - budget.spent()) : Infinity)
 
@@ -695,7 +701,7 @@ IMPORTANTE: reportá tu recomendación por el output estructurado (schema), no p
 phase('Setup')
 log(
   `▶ ${A.runLabel} — scope ${SCOPE_DESC} — rama ${RAMA} sobre ${BASE} — ` +
-    `budget ${BUDGET_TOTAL ? Math.round(BUDGET_TOTAL / 1000) + 'k' : 'SIN TOPE'}` +
+    `budget ${BUDGET_TOTAL ? Math.round(BUDGET_TOTAL / 1000) + 'k de output' : 'SIN TOPE'}` +
     `${A.budgetTotal ? ' (por args)' : budget.total ? ' (por directiva)' : ''} — ts=${A.ts}`
 )
 log(`tiers: ${Object.entries(T).map(([r, t]) => `${r}=${t}→${M[t]}`).join(' ')}`)
@@ -1014,7 +1020,7 @@ Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en 
 
   wavesReporte.push(waveResumen)
   if (wave === A.maxWaves) wavesAgotadas = true
-  log(`✔ wave ${wave} cerrada: ${waveResumen.merges.length} merges procesados, ${waveResumen.impl.length} impls — spent ${Math.round(budget.spent() / 1000)}k`)
+  log(`✔ wave ${wave} cerrada: ${waveResumen.merges.length} merges procesados, ${waveResumen.impl.length} impls — output ${Math.round(budget.spent() / 1000)}k`)
 }
 
 // --- Marcar para Leo (§3.16): etiqueta + comentario + lista de bloqueadas -----
@@ -1403,10 +1409,11 @@ const reporte = {
     ...bloqueadas,
     ...inReviewUltimo,
   ],
-  tokens_spent: budget.spent(),
+  // Solo output (ver BUDGET_TOTAL): el costo real está en /workflows y en los transcripts.
+  tokens_output: budget.spent(),
 }
 log(
   `■ fin ${A.runLabel}: ${reporte.status} — waves=${wavesReporte.length}` +
-    `${prFinal ? ` · PR final draft #${prFinal}` : ''} · bloqueadas=${bloqueadas.length} · bugs anotados=${bugsReales.length} · spent ${Math.round(budget.spent() / 1000)}k`
+    `${prFinal ? ` · PR final draft #${prFinal}` : ''} · bloqueadas=${bloqueadas.length} · bugs anotados=${bugsReales.length} · output ${Math.round(budget.spent() / 1000)}k`
 )
 return reporte
