@@ -434,7 +434,7 @@ const SETUP_SCHEMA = {
     token: {
       type: 'object',
       description: 'el JSON de pipeline-read.sh push-auth, tal cual',
-      properties: { via: { type: 'string' }, tipo: { type: 'string' }, scopes: { type: ['string', 'null'] } },
+      properties: { via: { type: 'string' }, tipo: { type: 'string' }, scopes: { description: "string con los scopes, o null: tal cual lo imprimió" } },
     },
   },
 }
@@ -1429,13 +1429,14 @@ const reporte = {
   pr_final_draft: prFinal,
   waves: wavesReporte,
   review: reviewReporte,
-  bloqueadas,
+  // Cada scout re-anota las HUMAN_GATED: sin deduplicar, la misma línea salía una vez por wave.
+  bloqueadas: [...new Set(bloqueadas)],
   pendientes,
   bugs_reales_para_issues: bugsReales,
   seguimientos,
   para_leo: [
     ...(reviewReporte.juicio?.humano ?? []).map((h) => `[review] ${h.titulo}: ${h.decision_necesaria}`),
-    ...bloqueadas,
+    ...new Set(bloqueadas),
     ...inReviewUltimo,
   ],
   // Solo output (ver BUDGET_TOTAL): el costo real está en /workflows y en los transcripts.
