@@ -49,6 +49,78 @@ export const meta = {
 // }
 // ============================================================================
 
+// ─── NÚCLEO PURO ───────────────────────────────────────────────────────────
+// Reglas del motor sin efectos: no llaman agent(), no leen args ni loguean. Las
+// extrae y las prueba tests/motor.test.mjs evaluando SOLO este bloque, así que
+// una referencia a algo de afuera revienta el test en vez de pasar en silencio.
+// ───────────────────────────────────────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// EL GATE (§3.3): función pura. Acá y solo acá se decide pasa/no-pasa.
+// ---------------------------------------------------------------------------
+function gate(med, base, { exigirTests = true } = {}) {
+  const motivos = []
+  if (!med) return { pass: false, motivos: ['validator murió'] }
+  if (med.status !== 'ok') return { pass: false, motivos: [`medición inválida: ${med.error ?? 'sin detalle'}`] }
+  // ratchet genérico: ninguna métrica empeora (convención "menor es mejor")
+  for (const k of Object.keys(base.metrics ?? {})) {
+    const b = base.metrics[k]
+    const c = med.metrics?.[k]
+    if (typeof c !== 'number') motivos.push(`métrica ${k} no reportada`)
+    else if (c > b) motivos.push(`${k} empeoró (${b} → ${c})`)
+  }
+  if (!(med.tests_failed <= base.tests_failed))
+    motivos.push(`tests rojos subieron (${base.tests_failed} → ${med.tests_failed})`)
+  const nuevosRojos = (med.failing_test_files ?? []).filter(
+    (f) => !(base.failing_test_files ?? []).includes(f)
+  )
+  if (nuevosRojos.length > 0) motivos.push(`tests antes-verdes ahora rojos: ${nuevosRojos.join(', ')}`)
+  const lockNuevos = (med.lockfiles_ajenos ?? []).filter((f) => !(base.lockfiles_ajenos ?? []).includes(f))
+  if (lockNuevos.length > 0) motivos.push(`lockfiles de package managers distintos en la misma carpeta: ${lockNuevos.join(', ')}`)
+  if (exigirTests) {
+    if (med.diff_toca_tests !== true) motivos.push('el diff no agrega ni modifica ningún test (anti "slice sin tests")')
+    if (med.tests_del_diff_verdes !== true) motivos.push('tests tocados por el diff no están todos verdes')
+  }
+  return { pass: motivos.length === 0, motivos }
+}
+
+// ---------------------------------------------------------------------------
+// Lockfiles ajenos (§3.3): dos package managers con lockfile trackeado en la misma
+// carpeta. El validator solo transporta `git ls-files`; la regla vive acá, en código.
+// Origen: autopsia cn-radar-al-dia-0921 (2026-09-21) — el applier corrió `npm install`
+// en un repo pnpm y coló dos package-lock.json que ningún gate numérico vio.
+// ---------------------------------------------------------------------------
+const MANAGER_DE_LOCKFILE = {
+  'package-lock.json': 'npm',
+  'yarn.lock': 'yarn',
+  'pnpm-lock.yaml': 'pnpm',
+  'bun.lockb': 'bun',
+  'bun.lock': 'bun',
+}
+function lockfilesAjenos(paths) {
+  const porCarpeta = {}
+  for (const p of paths ?? []) {
+    const corte = p.lastIndexOf('/') + 1
+    const manager = MANAGER_DE_LOCKFILE[p.slice(corte)]
+    if (manager) (porCarpeta[p.slice(0, corte)] ??= []).push({ p, manager })
+  }
+  return Object.values(porCarpeta)
+    .filter((l) => new Set(l.map((x) => x.manager)).size > 1)
+    .flatMap((l) => l.map((x) => x.p))
+    .sort()
+}
+const GLOBS_LOCKFILE = Object.keys(MANAGER_DE_LOCKFILE).map((n) => `'*${n}'`).join(' ')
+
+// Lo que el gate compara de una medición: el baseline de una wave o de la review.
+const aBaseline = (med) => ({
+  metrics: med.metrics,
+  tests_failed: med.tests_failed,
+  failing_test_files: med.failing_test_files,
+  lockfiles_ajenos: med.lockfiles_ajenos,
+})
+
+// ─── FIN DEL NÚCLEO PURO ───────────────────────────────────────────────────
+
 // §3.12.1 — args puede llegar objeto o string JSON según cómo se invoque el tool.
 // GUARDA: el orquestador T0 DEBE componer el objeto args (paso 2 de commands/prd-pipeline.md:
 // scope, models, tiers, rama, base, budgetTotal, ...). Pasar el scope crudo ("milestone:X +800k")
@@ -334,70 +406,6 @@ async function llamar(makePrompt, opts, intentos = 2) {
   }
   return null
 }
-
-// ---------------------------------------------------------------------------
-// EL GATE (§3.3): función pura. Acá y solo acá se decide pasa/no-pasa.
-// ---------------------------------------------------------------------------
-function gate(med, base, { exigirTests = true } = {}) {
-  const motivos = []
-  if (!med) return { pass: false, motivos: ['validator murió'] }
-  if (med.status !== 'ok') return { pass: false, motivos: [`medición inválida: ${med.error ?? 'sin detalle'}`] }
-  // ratchet genérico: ninguna métrica empeora (convención "menor es mejor")
-  for (const k of Object.keys(base.metrics ?? {})) {
-    const b = base.metrics[k]
-    const c = med.metrics?.[k]
-    if (typeof c !== 'number') motivos.push(`métrica ${k} no reportada`)
-    else if (c > b) motivos.push(`${k} empeoró (${b} → ${c})`)
-  }
-  if (!(med.tests_failed <= base.tests_failed))
-    motivos.push(`tests rojos subieron (${base.tests_failed} → ${med.tests_failed})`)
-  const nuevosRojos = (med.failing_test_files ?? []).filter(
-    (f) => !(base.failing_test_files ?? []).includes(f)
-  )
-  if (nuevosRojos.length > 0) motivos.push(`tests antes-verdes ahora rojos: ${nuevosRojos.join(', ')}`)
-  const lockNuevos = (med.lockfiles_ajenos ?? []).filter((f) => !(base.lockfiles_ajenos ?? []).includes(f))
-  if (lockNuevos.length > 0) motivos.push(`lockfiles de package managers distintos en la misma carpeta: ${lockNuevos.join(', ')}`)
-  if (exigirTests) {
-    if (med.diff_toca_tests !== true) motivos.push('el diff no agrega ni modifica ningún test (anti "slice sin tests")')
-    if (med.tests_del_diff_verdes !== true) motivos.push('tests tocados por el diff no están todos verdes')
-  }
-  return { pass: motivos.length === 0, motivos }
-}
-
-// ---------------------------------------------------------------------------
-// Lockfiles ajenos (§3.3): dos package managers con lockfile trackeado en la misma
-// carpeta. El validator solo transporta `git ls-files`; la regla vive acá, en código.
-// Origen: autopsia cn-radar-al-dia-0921 (2026-09-21) — el applier corrió `npm install`
-// en un repo pnpm y coló dos package-lock.json que ningún gate numérico vio.
-// ---------------------------------------------------------------------------
-const MANAGER_DE_LOCKFILE = {
-  'package-lock.json': 'npm',
-  'yarn.lock': 'yarn',
-  'pnpm-lock.yaml': 'pnpm',
-  'bun.lockb': 'bun',
-  'bun.lock': 'bun',
-}
-function lockfilesAjenos(paths) {
-  const porCarpeta = {}
-  for (const p of paths ?? []) {
-    const corte = p.lastIndexOf('/') + 1
-    const manager = MANAGER_DE_LOCKFILE[p.slice(corte)]
-    if (manager) (porCarpeta[p.slice(0, corte)] ??= []).push({ p, manager })
-  }
-  return Object.values(porCarpeta)
-    .filter((l) => new Set(l.map((x) => x.manager)).size > 1)
-    .flatMap((l) => l.map((x) => x.p))
-    .sort()
-}
-const GLOBS_LOCKFILE = Object.keys(MANAGER_DE_LOCKFILE).map((n) => `'*${n}'`).join(' ')
-
-// Lo que el gate compara de una medición: el baseline de una wave o de la review.
-const aBaseline = (med) => ({
-  metrics: med.metrics,
-  tests_failed: med.tests_failed,
-  failing_test_files: med.failing_test_files,
-  lockfiles_ajenos: med.lockfiles_ajenos,
-})
 
 // ---------------------------------------------------------------------------
 // Validator (T económico, effort low): ejecuta y cuenta. Jamás opina. (§3.12.4)
