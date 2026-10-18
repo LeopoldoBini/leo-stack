@@ -136,3 +136,25 @@ test('token sin permiso de workflows: el implementer recibe el veto y el gate fr
   assert.ok(resultado.bloqueadas.some((b) => /#9 gate FAIL.*vedados/.test(b)))
   assert.ok(logs.some((l) => /push: .*fine-grained.*vedado/.test(l)))
 })
+
+// ── Ítem 2: worktrees del motor dentro de la convención wf_* y re-medición ──
+
+test('todo worktree que crea el motor tiene carpeta wf_* (los tests del repo aíslan sus recursos por ese prefijo)', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] } } })
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE')
+  const carpetas = new Set(llamadas.flatMap((c) => [...c.prompt.matchAll(/\.host-orchestrator\/wt\/([A-Za-z0-9._-]+)/g)].map((m) => m[1])))
+  assert.ok(carpetas.size >= 2, `se esperaban la integradora y un PR, hubo: ${[...carpetas]}`)
+  for (const c of carpetas) if (!c.startsWith('<')) assert.match(c, /^wf_/, `la carpeta ${c} cae en la base compartida`)
+})
+
+test('medición inválida: se re-mide una vez antes de frenar (baseline, PR y gate de la issue)', async () => {
+  const mundo = crearMundo({
+    issues: { 1: {}, 2: { deps: [1] } },
+    fallas: { medicion: (etiqueta, intento) => (intento === 1 && /^(baseline-w1|pr500|i2)$/.test(etiqueta) ? 'invalida' : null) },
+  })
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.bloqueadas))
+  assert.equal(conLabel(llamadas, /^retry:/).length, 0, 'una medición rota no re-despacha al implementer')
+  assert.ok(!mundo.prs.get(500).labels.has('merge-blocked'))
+})

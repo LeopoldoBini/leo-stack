@@ -191,6 +191,13 @@ const aBaseline = (med) => ({
   lockfiles_ajenos: med.lockfiles_ajenos,
 })
 
+// Carpeta de un worktree que crea el motor (§3.10c). El prefijo `wf_` es el
+// contrato con el repo: los worktrees de los agentes de Claude Code ya caen en
+// `wf_*`/`agent-*`, y un repo que aísla recursos compartidos por worktree (la base
+// de tests de Radar, por ejemplo) reconoce esos prefijos. Con `pr-N` a secas, el
+// gate pre-merge medía contra la base compartida y dio un rojo falso (1017b).
+const carpetaDeWorktree = (repo, nombre) => `${repo}/.host-orchestrator/wt/wf_${nombre.replace(/\//g, '-')}`
+
 // ─── FIN DEL NÚCLEO PURO ───────────────────────────────────────────────────
 
 // §3.12.1 — args puede llegar objeto o string JSON según cómo se invoque el tool.
@@ -246,7 +253,8 @@ const effortDeIssue = (n) => A.issueEfforts?.[String(n)] ?? E.implementer
 const REPO = A.repo
 const RAMA = A.rama
 const BASE = A.base
-const WT_INTEGRACION = `${REPO}/.host-orchestrator/wt/${RAMA.replace(/\//g, '-')}`
+const WT_INTEGRACION = carpetaDeWorktree(REPO, RAMA)
+const wtDePr = (prNum) => carpetaDeWorktree(REPO, `pr-${prNum}`)
 const AUDIT_LOG = `${REPO}/.host-orchestrator/waves/${A.runLabel}.log`
 
 // §3.12.3 — budget por args (fuente primaria), fallback directiva, log de fuente
@@ -555,6 +563,17 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
   })
 }
 
+// §3.3 — "medición inválida nunca es éxito", pero tampoco es un rojo del código:
+// antes de frenar (ABORT del baseline, merge-blocked del PR, reintento del
+// implementer) se re-mide UNA vez. En 1018 un gate cayó por timeout del medidor y
+// el PR quedó bloqueado con el código sano.
+async function medirFirme(donde, faseTag, etiqueta, opciones = {}) {
+  const m = await medir(donde, faseTag, etiqueta, opciones)
+  if (m?.status === 'ok') return m
+  log(`⚠ medición ${etiqueta} inválida (${m?.error ?? 'validator murió'}) → se re-mide una vez`)
+  return medir(donde, faseTag, `${etiqueta}~m2`, opciones)
+}
+
 // ---------------------------------------------------------------------------
 // Serializer (§3.2): ÚNICA vía de mutación remota. Check-then-act, secuencial.
 // ---------------------------------------------------------------------------
@@ -623,7 +642,9 @@ const setup = await serializar(
   `Preparar la rama integradora del pipeline:
 1. cd ${REPO} && git fetch origin
 2. CHECK: ¿existe origin/${RAMA}? → si no: git branch ${RAMA} origin/${BASE} && git push -u origin ${RAMA} (contexto audit: setup)
-3. CHECK: ¿existe el worktree local ${WT_INTEGRACION}? → si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}); si existe: dentro de él git pull --ff-only.
+3. CHECK: ¿existe el worktree local ${WT_INTEGRACION}? → si existe: dentro de él git pull --ff-only. Si no:
+   a. Si la branch ${RAMA} ya está checkouteada en OTRO worktree (git worktree list; típico: el path de versiones anteriores del motor, sin el prefijo wf_), movelo: git worktree move <ese path> ${WT_INTEGRACION}.
+   b. Si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}).
 4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente). ${REGLA_DEPS}
 5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.`,
   'setup-rama',
@@ -755,7 +776,7 @@ ${refresh.detalle}`,
   }
 
   // --- Baseline de la wave (§3.3): sobre la rama integradora refrescada -----
-  const baseMed = await medir(WT_INTEGRACION, FASE, `baseline-w${wave}`, { pull: true })
+  const baseMed = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}`, { pull: true })
   if (!baseMed || baseMed.status !== 'ok') {
     log(`✖ baseline w${wave} inválido (${baseMed?.error ?? 'validator murió'}) — ABORT (medición inválida nunca es éxito)`)
     return { status: 'ABORT', fase: FASE, detalle: `baseline: ${baseMed?.error ?? 'validator murió'}`, waves: wavesReporte, bloqueadas }
@@ -774,7 +795,7 @@ ${refresh.detalle}`,
   // marca merge-blocked para Leo en vez de repetir el mismo intento cada wave.
   for (const iss of buckets.MERGE_READY ?? []) {
     const prNum = iss.pr_number
-    const wtPr = `${REPO}/.host-orchestrator/wt/pr-${prNum}`
+    const wtPr = wtDePr(prNum)
     const clavePr = `pr${prNum}`
     if (registro.decidir(clavePr) === 'para_leo') {
       await marcarPr(prNum, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clavePr).ultimo})`, FASE, { conservar: wtPr })
@@ -838,7 +859,7 @@ ${prep?.detalle ?? 'sin detalle'}`,
       }
     }
 
-    const medPr = await medir(wtPr, FASE, `pr${prNum}`, {})
+    const medPr = await medirFirme(wtPr, FASE, `pr${prNum}`, {})
     const g = gate(medPr, baseMetrics, { exigirTests: false }) // el PR ya pasó su gate al publicarse; acá exigimos no-regresión post-merge-de-rama
     if (!g.pass) {
       await marcarPr(prNum, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, FASE, { conservar: wtPr })
@@ -955,7 +976,7 @@ async function marcarPr(prNum, motivo, FASE, { conservar = null } = {}) {
     `El PR #${prNum} queda para Leo: ${motivo}.
 1. CHECK: gh pr view ${prNum} --json state,mergedAt,labels → si ya está mergeado: 'ya_estaba' y TERMINÁ (no etiquetes ni comentes).
 2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
-3. ${conservar ? `CONSERVÁ el worktree ${conservar}: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${REPO}/.host-orchestrator/wt/pr-${prNum}, limpialo (git worktree remove --force + git worktree prune).`}`,
+3. ${conservar ? `CONSERVÁ el worktree ${conservar}: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
     `block-pr${prNum}`,
     FASE
   )
@@ -1009,7 +1030,7 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
   if (!impl) return { issue: iss.number, gate: 'ERROR', motivos: ['implementer murió'] }
   if (impl.bloqueado) return { issue: iss.number, gate: 'FAIL', motivos: [`ticket: ${impl.bloqueado}`], impl }
 
-  let med = await medir(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
+  let med = await medirFirme(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
   let g = gate(med, baseMetrics, { vedados: VEDADOS })
   if (!g.pass) {
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
@@ -1020,7 +1041,7 @@ ${g.motivos.map((m) => `  - ${m}`).join('\n')}
 Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, commit local al final).${suf}`,
       { label: `retry:#${iss.number}`, phase: FASE, model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
     )
-    med = await medir(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
+    med = await medirFirme(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
     g = gate(med, baseMetrics, { vedados: VEDADOS })
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
@@ -1239,11 +1260,11 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de EST
               }
         }
         if (apl && apl.aplicadas > 0) {
-          const medRev = await medir(apl.worktree, 'Review', 'review-fixes', { conDiff: false })
+          const medRev = await medirFirme(apl.worktree, 'Review', 'review-fixes', { conDiff: false })
           // all_done en la wave 1 hace break antes de capturar baseline y la review
           // llega con baseMetrics null (corrida 16-17-0806) — recapturar acá.
           if (!baseMetrics) {
-            const baseRev = await medir(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true })
+            const baseRev = await medirFirme(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true })
             if (baseRev?.status === 'ok') baseMetrics = aBaseline(baseRev)
             else log(`⚠ baseline-review inválido (${baseRev?.error ?? 'validator murió'}) — gate de fixes solo con tests`)
           }

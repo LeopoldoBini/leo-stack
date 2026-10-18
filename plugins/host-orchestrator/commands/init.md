@@ -44,6 +44,8 @@ Este repo se opera con `cc-afk '<scope>' [+Nk]` — el launcher de `/host-orches
 
 **Una dependencia entre tickets existe solo si uno necesita el resultado del otro para funcionar o para testearse**; esa es la única que se declara con `Blocked by`. Dos tickets que tocan el mismo archivo o la misma página van en la misma wave: el merge-resolver concilia sus cambios. El breakdown está listo cuando entra en pocas waves anchas y cada `Blocked by` nombra el resultado que espera.
 
+**Worktrees:** el pipeline trabaja y mide en worktrees cuya carpeta empieza con `wf_` o `agent-`; el checkout principal es el único sin prefijo. Si los tests usan un recurso compartido (base de datos, puerto), aíslenlo para esas carpetas: dos mediciones a la vez sobre el mismo recurso se voltean entre sí.
+
 **Contrato de este repo:** `.host-orchestrator/config.json` — base branch, hook de validación, y los overrides de modelo/tier/effort que el repo quiera apartar de los defaults del motor.
 
 ### Refrescar
