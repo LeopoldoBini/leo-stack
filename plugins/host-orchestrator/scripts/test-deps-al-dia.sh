@@ -26,7 +26,8 @@ export REGISTRO="$TMP/instalaciones"
 : > "$REGISTRO"
 
 mkdir -p "$BIN"
-for m in npm pnpm yarn bun; do
+# bun queda afuera a propósito: es el manager "no instalado en esta máquina".
+for m in npm pnpm yarn; do
   cat > "$BIN/$m" <<EOF
 #!/usr/bin/env bash
 [ -f "\${FALLA_MANAGER:-/nada}" ] && { echo "$m: error simulado" >&2; exit 1; }
@@ -35,20 +36,24 @@ mkdir -p node_modules
 EOF
   chmod +x "$BIN/$m"
 done
-export PATH="$BIN:$PATH"
+PATH="$BIN:/usr/bin:/bin"
+export PATH
 
 instalaciones() { wc -l < "$REGISTRO" | tr -d ' '; }
 correr() { bash "$DEPS" "$REPO" > "$TMP/salida" 2>&1; }
 
-mkdir -p "$REPO/web" "$REPO/mixto"
+mkdir -p "$REPO/web" "$REPO/mixto" "$REPO/test/fixtures/viejo" "$REPO/tools/bunapp"
+for d in . web mixto tools/bunapp; do echo '{}' > "$REPO/$d/package.json"; done
 echo '{"v":1}' > "$REPO/package-lock.json"
 echo 'lockfileVersion: 9' > "$REPO/web/pnpm-lock.yaml"
 echo '{}' > "$REPO/mixto/package-lock.json"
 echo 'x' > "$REPO/mixto/yarn.lock"
+echo 'x' > "$REPO/test/fixtures/viejo/yarn.lock"
+echo 'x' > "$REPO/tools/bunapp/bun.lock"
 echo 'sin trackear' > "$REPO/suelto.lock"
 printf 'node_modules/\n' > "$REPO/.gitignore"
 git -C "$REPO" init -q
-git -C "$REPO" add package-lock.json web/pnpm-lock.yaml mixto .gitignore
+git -C "$REPO" add -A
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm base
 
 printf 'test-deps-al-dia\n\nprimera corrida: sin marca, instala\n'
@@ -58,6 +63,8 @@ afirma 'npm ci en la raíz'                           grep -qxF "npm $REPO ci --
 afirma 'pnpm congelado en web/'                      grep -qxF "pnpm $REPO/web install --frozen-lockfile" "$REGISTRO"
 afirma 'la carpeta con dos managers no se toca'      sh -c "! grep -q mixto '$REGISTRO'"
 afirma '…y se reporta como ambigua'                  grep -q 'mixto/ ambiguo' "$TMP/salida"
+afirma 'el lockfile de una fixture no se instala'    grep -q 'test/fixtures/viejo/ sin package.json' "$TMP/salida"
+afirma 'un manager ausente se reporta y no falla'    grep -q 'tools/bunapp/ bun no está instalado' "$TMP/salida"
 afirma 'deja la marca con el hash del lockfile'      grep -q "^npm $(git -C "$REPO" hash-object package-lock.json)" "$REPO/node_modules/.ho-lockfile"
 
 printf '\nsegunda corrida: nada cambió\n'

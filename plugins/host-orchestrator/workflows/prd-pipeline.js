@@ -58,8 +58,11 @@ export const meta = {
 // ---------------------------------------------------------------------------
 function gate(med, base, { exigirTests = true, vedados = [] } = {}) {
   const motivos = []
-  if (!med) return { pass: false, motivos: ['validator murió'] }
-  if (med.status !== 'ok') return { pass: false, motivos: [`medición inválida: ${med.error ?? 'sin detalle'}`] }
+  // `deMedicion`: el gate no pudo decir nada del código. Quien lo llama no le pide al
+  // implementer que "arregle" eso: es un problema del medidor, para Leo.
+  if (!med) return { pass: false, deMedicion: true, motivos: ['validator murió'] }
+  if (med.status !== 'ok') return { pass: false, deMedicion: true, motivos: [`medición inválida: ${med.error ?? 'sin detalle'}`] }
+  if (med.limpio === false) motivos.push('el worktree medido tiene cambios sin commitear: lo medido no es lo que se publicaría')
   // ratchet genérico: ninguna métrica empeora (convención "menor es mejor")
   for (const k of Object.keys(base.metrics ?? {})) {
     const b = base.metrics[k]
@@ -81,7 +84,7 @@ function gate(med, base, { exigirTests = true, vedados = [] } = {}) {
     // Los paths vedados (deny_paths del repo + lo que el token no puede publicar)
     // se hacen cumplir acá, no solo en el prompt: un diff que los toca no se publica.
     if (vedados.length) {
-      if (!Array.isArray(med.archivos_del_diff)) motivos.push('el medidor no reportó los archivos del diff: no se puede verificar los paths vedados')
+      if (!Array.isArray(med.archivos_del_diff)) return { pass: false, deMedicion: true, motivos: ['el medidor no reportó los archivos del diff: no se puede verificar los paths vedados'] }
       else {
         const tocados = tocaVedados(med.archivos_del_diff, vedados)
         if (tocados.length) motivos.push(`el diff toca paths vedados: ${tocados.join(', ')} — sacá esos cambios del slice`)
@@ -212,6 +215,17 @@ function crearMemoria() {
     completar(med) {
       if (!m.has(med?.arbol) || med.limpio !== true) return null
       return { ...med, ...JSON.parse(m.get(med.arbol)) }
+    },
+    // Un árbol cuyo gate falló no se recuerda: si el rojo fue espurio, la próxima vez
+    // (un reintento, o Leo destrabándolo) se vuelve a medir en vez de reusar el rojo.
+    olvidar(arbol) {
+      m.delete(arbol)
+    },
+    // La medición guardada de un árbol, lista para el gate; null si no está.
+    medicion(arbol) {
+      if (!m.has(arbol)) return null
+      const g = JSON.parse(m.get(arbol))
+      return { status: 'ok', arbol, limpio: true, ...g, lockfiles_ajenos: lockfilesAjenos(g.lockfiles) }
     },
   }
 }
@@ -565,16 +579,21 @@ async function llamar(makePrompt, opts, intentos = 2) {
 // guarda la medición y, si el árbol ya está en la memoria, el validator saltea la
 // medición y el motor completa con lo guardado.
 // ---------------------------------------------------------------------------
-function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {}) {
+// `esperado`: el árbol que el motor cree que hay en `donde` y ya tiene medido (el del
+// gate de la issue para su PR, el del último PR mergeado para la integradora). Va UNO,
+// nunca la lista de la memoria, y la comparación la hace el shell: si el modelo pudiera
+// elegir un id de una lista, un error suyo le prestaría a un árbol rojo la medición de
+// otro verde. El motor además acepta `ya_medido` solo si el árbol reportado es ése.
+function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false, esperado = null } = {}) {
   const en = `cd ${donde} &&`
-  const conocidos = memoria.arboles()
+  const conocido = esIdDeGit(esperado) && memoria.medicion(esperado) ? esperado : null
   // Con el árbol ya medido solo queda lo del diff; las dependencias hacen falta
   // únicamente si hay que correr los tests del diff (sin hook).
-  const yaMedido = conocidos.length
-    ? `\n   Árboles ya medidos en esta corrida: ${conocidos.join(' ')}
-   → si arbol está en esa lista Y limpio es true: ya_medido = true, metrics = {}, tests_failed = 0, failing_test_files = [], lockfiles = [], y SALTEÁ ${
+  const yaMedido = conocido
+    ? `\n1a. ${en} case "$(git rev-parse 'HEAD^{tree}')" in ${conocido}) echo YA_MEDIDO ;; *) echo MEDIR ;; esac
+   → si imprimió YA_MEDIDO y limpio es true: ya_medido = true, metrics = {}, tests_failed = 0, failing_test_files = [], lockfiles = [], y SALTEÁ ${
         conDiff && !A.validateHook ? 'los pasos 2 a 4 (el 1b sí, el 5 sí)' : conDiff ? 'los pasos 1b a 4 (el 5 sí)' : 'todos los pasos que siguen'
-      }: el motor ya tiene esa medición. Si no está en la lista, seguí normal.`
+      }: el motor ya tiene esa medición. Si imprimió MEDIR, seguí normal y ya_medido = false.`
     : ''
   const hook = A.validateHook
     ? `2. ${en} ${A.validateHook} --json   (timeout 420000)
@@ -586,7 +605,7 @@ function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {})
   const suite = `3. ${A.validateHook ? "Solo si el paso 2 no te dio tests_fuente='hook': " : ''}${en} <suite de tests del repo> (timeout 420000) → tests_failed = conteo de tests fallidos, failing_test_files = paths de archivos de test con fallas, relativos a la raíz del repo; tests_fuente = 'suite'. Todo verde → 0 y lista vacía.`
   const diff = conDiff
     ? `5. Mecánica del diff contra origin/${RAMA} (timeout 120000):
-   ${en} git fetch origin && git diff --name-only origin/${RAMA}...HEAD
+   ${en} git fetch origin && git diff --name-only --no-renames origin/${RAMA}...HEAD
    → archivos_del_diff = esa lista tal cual; tests_del_diff = los que matchean ${JSON.stringify(A.testGlobs)}; diff_toca_tests = ¿hay alguno?
    → ${A.validateHook ? "si tests_fuente='hook': NO los corras, el motor deriva tests_del_diff_verdes de la salida del hook. Si no: " : ''}${en} <runner con SOLO los archivos de test del diff> → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
     : ''
@@ -607,7 +626,10 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
   ).then((crudo) => {
     let r = crudo
     if (r?.ya_medido) {
-      r = memoria.completar(r) ?? { ...r, status: 'error', error: `el medidor dijo "ya medido" sobre el árbol ${r.arbol}, que el motor no tiene` }
+      r =
+        r.arbol === conocido
+          ? (memoria.completar(r) ?? { ...r, status: 'error', error: `el medidor dijo "ya medido" sobre el árbol ${r.arbol} con cambios sin commitear` })
+          : { ...r, status: 'error', error: `el medidor dijo "ya medido" sobre el árbol ${r.arbol}, que no es el esperado (${conocido ?? 'ninguno'})` }
     }
     // §3.3 — el contrato de metrics es CERRADO: solo las claves de la whitelist
     // (args.metricKeys, default typecheck_errors), CON o SIN hook. Un validator que
@@ -638,8 +660,8 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
 async function medirFirme(donde, faseTag, etiqueta, opciones = {}) {
   const m = await medir(donde, faseTag, etiqueta, opciones)
   if (m?.status === 'ok') return m
-  log(`⚠ medición ${etiqueta} inválida (${m?.error ?? 'validator murió'}) → se re-mide una vez`)
-  return medir(donde, faseTag, `${etiqueta}~m2`, opciones)
+  log(`⚠ medición ${etiqueta} inválida (${m?.error ?? 'validator murió'}) → se re-mide una vez, entera`)
+  return medir(donde, faseTag, `${etiqueta}~m2`, { ...opciones, esperado: null })
 }
 
 // ---------------------------------------------------------------------------
@@ -715,7 +737,8 @@ const setup = await serializar(
    a. Si la branch ${RAMA} ya está checkouteada en OTRO worktree (git worktree list; típico: el path de versiones anteriores del motor, sin el prefijo wf_), movelo: git worktree move <ese path> ${WT_INTEGRACION}.
    b. Si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}).
 4. ${DEPS(WT_INTEGRACION)}   → deja las dependencias iguales al lockfile (reinstala solo si cambió). Sale ≠ 0 → status 'blocked' con su salida.
-5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.`,
+5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.
+6. Etiquetas con las que el motor marca lo que queda para Leo: cd ${REPO} && gh label list --limit 300 --json name --jq '.[].name' → para cada una de agent-blocked, merge-blocked, review-fix que NO aparezca: gh label create <nombre> (contexto audit: setup-labels). Sin ellas, marcar falla y un relanzamiento reimplementa.`,
   'setup-rama',
   'Setup',
   SETUP_SCHEMA
@@ -731,6 +754,11 @@ const VEDADOS = vetoPush.vedar ? [...new Set([...A.denyPaths, VETO_WORKFLOWS])] 
 log(`push: ${vetoPush.motivo}${vetoPush.vedar ? ` → ${VETO_WORKFLOWS} vedado` : ''}`)
 const registro = crearRegistro()
 const memoria = crearMemoria()
+// Lo que el motor sabe de cada árbol, para declarar el `esperado` de cada medición:
+// el de la integradora (último baseline, o el del último PR mergeado) y el que midió
+// el gate de cada issue (que es el de su PR mientras la integradora no se mueva).
+let arbolIntegradora = null
+const arbolDeIssue = new Map()
 
 // ===========================================================================
 // LOOP DE WAVES
@@ -814,6 +842,7 @@ for (let wave = 1; wave <= A.maxWaves; wave++) {
     `refresh-w${wave}`,
     FASE
   )
+  if (refresh?.status !== 'ya_estaba') arbolIntegradora = null // trajo algo de la base (o no se sabe): árbol nuevo
   if (refresh?.status === 'blocked') {
     log(`refresh w${wave} conflictúa (${refresh.detalle}) → merge-resolver`)
     const veredicto = await resolver(
@@ -846,12 +875,13 @@ ${refresh.detalle}`,
   }
 
   // --- Baseline de la wave (§3.3): sobre la rama integradora refrescada -----
-  const baseMed = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}`, { pull: true })
+  const baseMed = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}`, { pull: true, esperado: arbolIntegradora })
   if (!baseMed || baseMed.status !== 'ok') {
     log(`✖ baseline w${wave} inválido (${baseMed?.error ?? 'validator murió'}) — ABORT (medición inválida nunca es éxito)`)
     return { status: 'ABORT', fase: FASE, detalle: `baseline: ${baseMed?.error ?? 'validator murió'}`, waves: wavesReporte, bloqueadas }
   }
   baseMetrics = aBaseline(baseMed)
+  arbolIntegradora = baseMed.arbol
   log(
     `baseline w${wave}: ${Object.entries(baseMed.metrics).map(([k, v]) => `${k}=${v}`).join(' ')} testsRojos=${baseMed.tests_failed}` +
       ` (tests por ${baseMed.tests_fuente ?? '?'})${baseMed.lockfiles_ajenos.length ? ` lockfilesAjenos=${baseMed.lockfiles_ajenos.join(',')}` : ''}`
@@ -929,9 +959,10 @@ ${prep?.detalle ?? 'sin detalle'}`,
       }
     }
 
-    const medPr = await medirFirme(wtPr, FASE, `pr${prNum}`, {})
+    const medPr = await medirFirme(wtPr, FASE, `pr${prNum}`, { esperado: arbolDeIssue.get(iss.number) })
     const g = gate(medPr, baseMetrics, { exigirTests: false }) // el PR ya pasó su gate al publicarse; acá exigimos no-regresión post-merge-de-rama
     if (!g.pass) {
+      if (medPr?.arbol) memoria.olvidar(medPr.arbol)
       await marcarPr(prNum, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, FASE, { conservar: wtPr })
       waveResumen.merges.push({ pr: prNum, resultado: 'gate-fail', motivo: g.motivos })
       continue
@@ -947,7 +978,11 @@ ${prep?.detalle ?? 'sin detalle'}`,
     )
     log(`merge PR #${prNum}: ${mrg?.status ?? 'serializer murió'}`)
     if (mrg?.status === 'blocked') await marcarPr(prNum, `el merge no se completó: ${mrg.detalle}`, FASE)
-    else if (mrg) registro.anotar(clavePr, { ultimo: `merge ${mrg.status}` })
+    else if (mrg) {
+      registro.anotar(clavePr, { ultimo: `merge ${mrg.status}` })
+      // squash de una branch que ya contiene la integradora: queda su mismo árbol
+      arbolIntegradora = medPr.arbol ?? null
+    }
     waveResumen.merges.push({ pr: prNum, resultado: mrg?.status ?? 'serializer murió', motivo: mrg?.detalle })
   }
 
@@ -972,8 +1007,11 @@ ${prep?.detalle ?? 'sin detalle'}`,
         break
       }
       if ((fotoImpl.IMPLEMENTABLE ?? []).length) {
-        const basePost = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}-post`, { pull: true })
-        if (basePost?.status === 'ok') baseMetrics = aBaseline(basePost)
+        const basePost = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}-post`, { pull: true, esperado: arbolIntegradora })
+        if (basePost?.status === 'ok') {
+          baseMetrics = aBaseline(basePost)
+          arbolIntegradora = basePost.arbol
+        }
         else log(`⚠ baseline post-merge w${wave} inválido (${basePost?.error ?? 'validator murió'}) — los gates de esta wave comparan contra el de antes de los merges`)
       }
     } else log(`⚠ scout post-merge w${wave} murió — se implementa con la foto de antes de los merges`)
@@ -996,9 +1034,16 @@ ${prep?.detalle ?? 'sin detalle'}`,
     for (const iss of implementables) registro.intento(`i${iss.number}`, { ultimo: 'el implementer no devolvió resultado' })
     const deny = VEDADOS.length ? `\nPATHS VEDADOS (ratchets/guards del repo y lo que el token de push no puede publicar — NO los toques ni "mejores" nada ahí; el gate rechaza un diff que los toque): ${VEDADOS.join(', ')}` : ''
 
+    // Destrabada una publicación bloqueada, se republica su worktree: el trabajo ya
+    // estaba hecho y medido (el gate pre-merge vuelve a mirar la no-regresión).
     const implResultados = (
       await parallel(
-        implementables.map((iss) => () => implementarConGate(iss, FASE, deny))
+        implementables.map((iss) => () => {
+          const p = registro.dato(`i${iss.number}`)?.publicable
+          if (!p) return implementarConGate(iss, FASE, deny)
+          log(`#${iss.number} destrabada: se republica el worktree conservado ${p.impl.worktree}, sin reimplementar`)
+          return Promise.resolve({ issue: iss.number, titulo: p.titulo, gate: 'PASS', motivos: [], impl: p.impl })
+        })
       )
     ).filter(Boolean)
 
@@ -1009,6 +1054,7 @@ ${prep?.detalle ?? 'sin detalle'}`,
       if (r.impl?.worktree) registro.anotar(`i${r.issue}`, { worktree: r.impl.worktree })
       if (r.gate !== 'PASS') {
         if (r.gate === 'FAIL') await marcarIssue(r.issue, `gate FAIL tras el reintento: ${(r.motivos ?? []).join('; ')}`, FASE, r.impl?.worktree)
+        else if (r.gate === 'MEDICION') await marcarIssue(r.issue, `el medidor no pudo medir (problema del medidor, no del código): ${(r.motivos ?? []).join('; ')}`, FASE, r.impl?.worktree)
         else registro.anotar(`i${r.issue}`, { ultimo: (r.motivos ?? []).join('; ') })
         continue
       }
@@ -1036,10 +1082,14 @@ Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en 
       }
       log(`publish #${r.issue}: ${pub?.status ?? 'serializer murió'} ${pub?.pr_number ? `→ PR #${pub.pr_number}` : ''}`)
       if (pub?.status === 'blocked') {
+        // Si Leo destraba la issue (arregla el token, por ejemplo), lo que corresponde
+        // es volver a publicar este worktree, no reimplementar: queda anotado.
+        registro.anotar(`i${r.issue}`, { publicable: { issue: r.issue, titulo: r.titulo, impl: r.impl } })
         await marcarIssue(r.issue, `publicación bloqueada dos veces: ${pub.detalle}`, FASE, r.impl.worktree)
         continue
       }
-      registro.anotar(`i${r.issue}`, { ultimo: pub ? `publicado (${pub.status})` : 'la publicación no devolvió resultado' })
+      // Publicado, el worktree se limpia: un comentario posterior ya no puede nombrarlo.
+      registro.anotar(`i${r.issue}`, { ultimo: pub ? `publicado (${pub.status})` : 'la publicación no devolvió resultado', ...(pub ? { worktree: null, publicable: null } : {}) })
       // El PR por-issue va contra la rama integradora (no la default) → su "Closes #" es inerte.
       // Anotamos la issue para inyectar el autocierre real en el PR final (integradora → default).
       if (pub && (pub.pr_number || pub.status)) cerradas.push(r.issue)
@@ -1073,8 +1123,8 @@ async function marcarPr(prNum, motivo, FASE, { conservar = null } = {}) {
   const r = await serializar(
     `El PR #${prNum} queda para Leo: ${motivo}.
 1. CHECK: gh pr view ${prNum} --json state,mergedAt,labels → si ya está mergeado: 'ya_estaba' y TERMINÁ (no etiquetes ni comentes).
-2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
-3. ${conservar ? `CONSERVÁ el worktree ${conservar}: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
+2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado, si quedó: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
+3. ${conservar ? `Si existe el worktree ${conservar}, CONSERVALO: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
     `block-pr${prNum}`,
     FASE
   )
@@ -1086,12 +1136,18 @@ async function marcarPr(prNum, motivo, FASE, { conservar = null } = {}) {
 async function implementarConGate(iss, FASE, deny) {
   const tier = A.issueTiers?.[String(iss.number)] ?? T.implementer
   const esfuerzo = effortDeIssue(iss.number)
-  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]}, effort ${esfuerzo})`)
+  // Una branch por intento: si un hecho nuevo re-despacha la issue, la branch del
+  // intento anterior sigue checkouteada en su worktree conservado, y `checkout -B`
+  // con el mismo nombre falla (o, peor, deja huérfanos esos commits). El PR se liga
+  // a la issue por el "Closes #N" del body, no por el nombre.
+  const intento = registro.dato(`i${iss.number}`)?.intentos ?? 1
+  const branch = intento > 1 ? `issue-${iss.number}-v${intento}` : `issue-${iss.number}`
+  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]}, effort ${esfuerzo})${intento > 1 ? ` — intento ${intento}, branch ${branch}` : ''}`)
   const impl = await llamar(
     (suf) => `Implementá la issue #${iss.number} ("${iss.title}") del repo en tu worktree AISLADO (tu cwd). No salgas de él.
 
 PASO 0 (obligatorio — la base se toma del REMOTO, §3.11):
-  git fetch origin && git checkout -B issue-${iss.number} origin/${RAMA}
+  git fetch origin && git checkout -B ${branch} origin/${RAMA}
   ${DEPS('.')}   (deja las dependencias iguales al lockfile; reinstala solo si cambió)
   Si tu slice cambia dependencias: ${REGLA_DEPS}
 PASO 1: leé el contrato — es el BODY del ticket: gh issue view ${iss.number} (gh solo LECTURA: prohibida toda mutación remota).
@@ -1131,7 +1187,10 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
 
   let med = await medirFirme(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
   let g = gate(med, baseMetrics, { vedados: VEDADOS })
+  // Si el gate no pudo medir, reintentar al implementer es mandarlo a arreglar el medidor.
+  if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
   if (!g.pass) {
+    if (med?.arbol) memoria.olvidar(med.arbol)
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
     await llamar(
       (suf) => `Sos el implementer de la issue #${iss.number} en tu SEGUNDO y ÚLTIMO intento. Tu trabajo está en ${impl.worktree} (branch ${impl.branch}) — cd ahí primero.
@@ -1142,8 +1201,11 @@ Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, 
     )
     med = await medirFirme(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
     g = gate(med, baseMetrics, { vedados: VEDADOS })
+    if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
+    if (!g.pass && med?.arbol) memoria.olvidar(med.arbol)
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
+  if (g.pass) arbolDeIssue.set(iss.number, med.arbol)
   return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl }
 }
 
@@ -1364,7 +1426,7 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de EST
           // all_done en la wave 1 hace break antes de capturar baseline y la review
           // llega con baseMetrics null (corrida 16-17-0806) — recapturar acá.
           if (!baseMetrics) {
-            const baseRev = await medirFirme(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true })
+            const baseRev = await medirFirme(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true, esperado: arbolIntegradora })
             if (baseRev?.status === 'ok') baseMetrics = aBaseline(baseRev)
             else log(`⚠ baseline-review inválido (${baseRev?.error ?? 'validator murió'}) — gate de fixes solo con tests`)
           }

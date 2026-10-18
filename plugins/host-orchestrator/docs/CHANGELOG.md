@@ -20,6 +20,8 @@ Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, de
 
 **Scout después de los merges** (spec §3.14). Lo implementable salía de la foto de antes de los merges, así que cada eslabón de una cadena gastaba dos waves. Si en la wave entró un PR, corre otro scout y lo destrabado se despacha en la misma wave, contra el baseline de la integradora ya mergeada (la memoria por árbol lo tiene medido). Una cadena de N eslabones termina en N+1 waves; el piso de `--max-waves` baja a `eslabones + 2`.
 
+**Lo que agregó la revisión en ventana limpia de esta versión** (antes de publicarla): cada medición declara un único árbol esperado y la comparación la hace el shell —con la lista de árboles medidos, un medidor que elegía mal le prestaba a un PR rojo la medición verde de otro y el PR se mergeaba—; un árbol cuyo gate falla se olvida; un worktree con cambios sin commitear no pasa el gate; si el medidor no puede medir, la issue queda para Leo como problema del medidor en vez de reintentar al implementer; cada re-despacho usa su propia branch y una publicación destrabada se republica sin reimplementar; `deps-al-dia.sh` saltea lockfiles sin `package.json` (fixtures) y managers ausentes; `git diff --no-renames` para que un rename no esconda un path vedado; el Setup crea las etiquetas del motor; el operador sabe cómo llenar los huecos `<suite de tests del repo>` del medidor sin hook.
+
 **El motor tiene tests.** `tests/simulador.mjs` corre `prd-pipeline.js` tal cual contra un GitHub y un git de mentira, con agentes falsos por label; las reglas puras viven en un bloque marcado que el test evalúa solo. `node --test 'plugins/host-orchestrator/tests/*.test.mjs'`.
 
 ## 4.14.1 (2026-10-15)

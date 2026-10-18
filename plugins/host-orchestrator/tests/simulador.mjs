@@ -163,15 +163,20 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     const donde = dondeDe(prompt)
     const wt = esIntegracion(donde) ? { arbol: arbolIntegracion() } : wts.get(donde)
     if (!wt) return { status: 'error', error: `worktree desconocido: ${donde}`, metrics: {}, tests_failed: -1, failing_test_files: [], lockfiles: [] }
-    const conocidos = (prompt.match(/Árboles ya medidos en esta corrida: ([^\n]*)/)?.[1] ?? '').split(/\s+/).filter(Boolean)
-    const base = { arbol: wt.arbol, limpio: true, commit: commitDe(wt.arbol) }
+    // El árbol esperado lo compara el shell (`case … in <id>)`): el medidor honesto
+    // dice ya_medido solo si coincide. `yaMedidoFalso` simula al que se equivoca.
+    const esperado = prompt.match(/case "\$\(git rev-parse 'HEAD\^\{tree\}'\)" in ([0-9a-f]{40})\)/)?.[1]
+    const limpio = !fallas.sucio?.(etiqueta, intento)
+    const base = { arbol: wt.arbol, limpio, commit: commitDe(wt.arbol) }
     const diff = /Mecánica del diff/.test(prompt)
       ? { diff_toca_tests: true, tests_del_diff: ['src/x.test.ts'], archivos_del_diff: ['src/x.ts', 'src/x.test.ts', ...(wt.toca ?? [])], ...(hook ? {} : { tests_del_diff_verdes: true }) }
       : {}
-    if (conocidos.includes(wt.arbol)) return { status: 'ok', ya_medido: true, ...base, metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
-    if (fallas.yaMedidoFalso?.(etiqueta, intento)) return { status: 'ok', ya_medido: true, ...base, metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
+    if (esperado && esperado === wt.arbol && limpio) return { status: 'ok', ya_medido: true, ...base, metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
+    const falso = fallas.yaMedidoFalso?.(etiqueta, intento, { esperado, arbolIntegracion: arbolIntegracion() })
+    if (falso) return { status: 'ok', ya_medido: true, ...base, ...(typeof falso === 'string' ? { arbol: falso } : {}), metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles: [], ...diff }
     mundo.mediciones.push({ etiqueta, arbol: wt.arbol, issues: conjuntoDe.get(wt.arbol) })
-    const rojos = [...new Set(conjuntoDe.get(wt.arbol).flatMap((n) => fallas.rojo?.(n) ?? []))]
+    const conjunto = conjuntoDe.get(wt.arbol)
+    const rojos = [...new Set([...conjunto.flatMap((n) => fallas.rojo?.(n, etiqueta, intento) ?? []), ...(fallas.rojosDe?.(conjunto) ?? [])])]
     return {
       status: 'ok', ...base, metrics: { typecheck_errors: 0 }, tests_failed: rojos.length, failing_test_files: rojos,
       tests_fuente: hook ? 'hook' : 'suite', lockfiles: ['package-lock.json'], ...diff,
@@ -182,11 +187,12 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     const n = Number(label.match(/#(\d+)/)[1])
     const intento = contar(`impl:${n}`)
     mundo.despachos.push(n)
+    mundo.branches.push(prompt.match(/git checkout -B (\S+)/)?.[1])
     const f = fallas.implementer?.(n, intento)
     if (f === 'muere') return null
     if (f?.bloqueado) return { worktree: `/repo/.claude/worktrees/wf_sim-${n}-${intento}`, branch: `issue-${n}`, resumen: 'no pude', bloqueado: f.bloqueado }
     const path = `/repo/.claude/worktrees/wf_sim-${n}-${intento}`
-    const base = prompt.match(/git checkout -B issue-\d+ (\S+)/)?.[1]
+    const base = prompt.match(/git checkout -B issue-[\d]+(?:-v\d+)? (\S+)/)?.[1]
     const desde = conjuntoDe.get(base) ?? mergeadas
     wts.set(path, { arbol: arbol([...desde, n]), issue: n, toca: f?.toca })
     return { worktree: path, branch: `issue-${n}`, resumen: `implementé #${n}` }
@@ -222,12 +228,20 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       const num = Number(m[1])
       const intento = contar(`merge:${num}`)
       const motivo = fallas.merge?.(num, intento)
+      if (motivo === 'muere') return null
       if (motivo) return { status: 'blocked', detalle: motivo }
       const pr = prs.get(num)
       if (!pr.merged) { pr.merged = true; mergeadas.push(pr.issue) }
       return { status: 'ok', pr_number: num, detalle: 'mergeado' }
     }
-    if ((m = tarea.match(/^block-i(\d+)$/))) { issue.get(Number(m[1])).labels.add('agent-blocked'); mundo.bloqueos.push(Number(m[1])); return { status: 'ok', detalle: 'etiquetada' } }
+    if ((m = tarea.match(/^block-i(\d+)$/))) {
+      const n = Number(m[1])
+      mundo.marcas.push(n)
+      if (fallas.marcar?.(n)) return { status: 'blocked', detalle: 'gh: label no encontrada' }
+      issue.get(n).labels.add('agent-blocked')
+      mundo.bloqueos.push(n)
+      return { status: 'ok', detalle: 'etiquetada' }
+    }
     if ((m = tarea.match(/^(gatefail|block)-pr(\d+)$/))) { prs.get(Number(m[2])).labels.add('merge-blocked'); return { status: 'ok', detalle: 'merge-blocked' } }
     if (tarea === 'review-publish') return { status: 'ok', pr_number: 900, detalle: 'review mergeado' }
     if (tarea === 'pr-final') return { status: 'ok', pr_number: 999, detalle: 'PR final draft' }
@@ -245,6 +259,8 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     mediciones: [],
     despachos: [],
     bloqueos: [],
+    marcas: [],
+    branches: [],
     paralelo: null,
     veces,
     prs,

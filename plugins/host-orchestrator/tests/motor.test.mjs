@@ -189,6 +189,9 @@ test('memoria: guarda solo mediciones ok de un árbol limpio y completa las ya m
   assert.deepEqual(c.failing_test_files, ['a.test.ts'])
   assert.deepEqual(c.tests_del_diff, ['x.test.ts'], 'lo del diff es de esta medición, no del árbol')
   assert.equal(m.completar({ ya_medido: true, arbol: 'b'.repeat(40), limpio: true }), null)
+  assert.equal(m.completar({ ya_medido: true, arbol: ARBOL, limpio: false }), null, 'sobre cambios sin commitear no se completa')
+  m.olvidar(ARBOL)
+  assert.equal(m.medicion(ARBOL), null)
 })
 
 test('cadena 1←2←3: cada árbol se mide una vez (gate de la issue → pre-merge → baseline siguiente)', async () => {
@@ -205,7 +208,7 @@ test('un medidor que dice "ya medido" sobre un árbol que el motor no tiene no c
   const { resultado, logs } = await correrMotor({ mundo })
   assert.equal(resultado.status, 'DONE')
   assert.ok(mundo.mediciones.some((m) => m.etiqueta === 'i1'), 'el árbol de la issue se midió de verdad')
-  assert.ok(logs.some((l) => /i1 inválida.*no tiene/.test(l)))
+  assert.ok(logs.some((l) => /i1 inválida.*no es el esperado/.test(l)))
 })
 
 // ── Ítem 5: los roles mecánicos corren con el agente liviano ──
@@ -230,4 +233,103 @@ test('cadena 1←2←3: cada eslabón cuesta una wave, no dos (el scout corre ta
   const impl2 = llamadas.findIndex((c) => c.label === 'implementer:#2')
   const fase = (i) => llamadas[i].phase
   assert.equal(fase(impl2), fase(merge1), '#2 se despacha en la misma wave en que entra #1')
+})
+
+// ── Hallazgos de la revisión de la Entrega 1 ──
+
+test('el medidor no puede prestarle a un PR rojo la medición verde de otro árbol', async () => {
+  // El gate pre-merge del PR de #2 responde "ya medido" con el árbol de la integradora
+  // (verde), pero el árbol del PR rompe un test. Antes el motor completaba con los
+  // números verdes y mergeaba el rojo.
+  const mundo = crearMundo({
+    issues: { 1: {}, 2: {} },
+    fallas: {
+      rojo: (n, etiqueta) => (n === 2 && etiqueta !== 'i2' ? ['src/roto.test.ts'] : []),
+      yaMedidoFalso: (etiqueta, intento, { arbolIntegracion }) => (etiqueta === 'pr501' && intento === 1 ? arbolIntegracion : false),
+    },
+  })
+  const { resultado } = await correrMotor({ mundo })
+  assert.ok(!mundo.mergeadas.includes(2), 'el PR rojo se mergeó')
+  assert.ok(mundo.prs.get(501).labels.has('merge-blocked'))
+  assert.notEqual(resultado.status, 'DONE')
+})
+
+test('un rojo espurio no queda fijo: destrabado el PR, el árbol se vuelve a medir', async () => {
+  // #1 y #2 salen juntas; al integrar #2 sobre #1 el árbol es nuevo y su medición da
+  // un rojo espurio. Leo saca merge-blocked: el árbol se mide de nuevo, no se reusa.
+  const mundo = crearMundo({
+    issues: { 1: {}, 2: {} },
+    fallas: { rojo: (n, etiqueta, intento) => (etiqueta === 'pr501' && intento === 1 ? ['src/flaky.test.ts'] : []) },
+    alInvocar: (label, m) => { if (label === 'scout:w3') m.prs.get(501)?.labels.delete('merge-blocked') },
+  })
+  const { resultado } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+  assert.equal(mundo.mediciones.filter((m) => m.etiqueta === 'pr501').length, 2)
+})
+
+test('un worktree con cambios sin commitear no pasa el gate de la issue', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { sucio: (etiqueta) => etiqueta === 'i1' } })
+  const { llamadas } = await correrMotor({ mundo })
+  assert.equal(conLabel(llamadas, /^retry:#1$/).length, 1, 'el implementer recibe el motivo y reintenta')
+  assert.match(conLabel(llamadas, /^retry:#1$/)[0].prompt, /sin commitear/)
+})
+
+test('un re-despacho por hecho nuevo usa otra branch (la anterior sigue en su worktree conservado)', async () => {
+  const mundo = crearMundo({
+    issues: { 4: {} },
+    fallas: { implementer: (n, intento) => (intento === 1 ? { bloqueado: 'TICKET_AMBIGUOUS' } : null) },
+    alInvocar: (label, m) => { if (label === 'scout:w2') m.issue.get(4).labels.delete('agent-blocked') },
+  })
+  await correrMotor({ mundo })
+  assert.deepEqual(mundo.branches, ['issue-4', 'issue-4-v2'])
+})
+
+test('publicación destrabada: se republica el worktree conservado, sin reimplementar', async () => {
+  const mundo = crearMundo({
+    issues: { 207: {} },
+    fallas: { publicar: (n, intento) => (intento <= 2 ? rechazoWorkflow : null) },
+    alInvocar: (label, m) => { if (label === 'scout:w2') m.issue.get(207).labels.delete('agent-blocked') },
+  })
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(conLabel(llamadas, /^implementer:#207$/).length, 1)
+  assert.equal(resultado.status, 'DONE')
+  assert.match(conLabel(llamadas, /^serializer:publish-i207$/).at(-1).prompt, /wf_sim-207-1/)
+})
+
+test('si el medidor no puede medir, el implementer no se reintenta: queda para Leo como problema del medidor', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { medicion: (etiqueta) => (etiqueta === 'i1' ? 'invalida' : null) } })
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(conLabel(llamadas, /^retry:/).length, 0)
+  assert.ok(resultado.bloqueadas.some((b) => /#1 el medidor no pudo medir/.test(b)))
+})
+
+test('merge cuyo serializer muere: el PR vuelve MERGE_READY y queda para Leo, no se reintenta', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { merge: () => 'muere' } })
+  const { llamadas } = await correrMotor({ mundo })
+  assert.equal(conLabel(llamadas, /^serializer:merge-pr500$/).length, 1)
+  assert.ok(mundo.prs.get(500).labels.has('merge-blocked'))
+})
+
+test('el gate de la issue compara contra la integradora ya mergeada, no contra la de antes de los merges', async () => {
+  // old.test.ts está rojo hasta que entra #1; #2 lo vuelve a romper. Contra el
+  // baseline de antes de los merges (con old.test.ts rojo) el rojo de #2 pasaba.
+  const mundo = crearMundo({
+    issues: { 1: {}, 2: { deps: [1] } },
+    fallas: { rojosDe: (c) => (!c.includes(1) || c.includes(2) ? ['old.test.ts'] : []) },
+  })
+  const { resultado } = await correrMotor({ mundo, args: { maxParallel: 1 } })
+  assert.ok(resultado.bloqueadas.some((b) => /#2 gate FAIL.*old\.test\.ts/.test(b)), JSON.stringify(resultado.bloqueadas))
+})
+
+test('si la etiqueta no se pudo poner, la vuelta del trabajo tampoco se despacha', async () => {
+  const mundo = crearMundo({ issues: { 3: {} }, fallas: { implementer: () => 'muere', marcar: () => true } })
+  const { llamadas } = await correrMotor({ mundo, args: { maxWaves: 4 } })
+  assert.equal(conLabel(llamadas, /^implementer:#3$/).length, 1)
+  assert.ok(mundo.marcas.length >= 2, 'el motor insiste en marcarla, no en reimplementarla')
+})
+
+test('bloqueadas sale sin repetidos', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: {} }, fallas: { implementer: (n) => (n === 2 ? { bloqueado: 'x' } : null) } })
+  const { resultado } = await correrMotor({ mundo })
+  assert.equal(new Set(resultado.bloqueadas).size, resultado.bloqueadas.length)
 })

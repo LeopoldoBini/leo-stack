@@ -14,12 +14,17 @@
 #
 # Managers: package-lock.json → npm ci · pnpm-lock.yaml → pnpm --frozen-lockfile
 # · yarn.lock → yarn --immutable (berry) o --frozen-lockfile (v1) · bun.lock(b)
-# → bun --frozen-lockfile. Una carpeta con lockfiles de dos managers no se toca:
-# se reporta (el gate ya la marca como lockfiles_ajenos, §3.3).
+# → bun --frozen-lockfile.
 #
-# Una línea por carpeta a stdout. Sale 0 si todo quedó al día, 1 si alguna
-# instalación falló (sin marca nueva: la próxima corrida reintenta), 2 si <dir>
-# no es un repo git.
+# No se tocan, y se reportan: una carpeta con lockfiles de dos managers (el gate
+# ya la marca como lockfiles_ajenos, §3.3), una carpeta sin package.json (el
+# lockfile de una fixture de test no es un proyecto a instalar) y una cuyo
+# manager no está instalado en esta máquina. Ninguna de las tres puede dar un
+# falso verde: si los tests necesitaban esas dependencias, salen rojos.
+#
+# Una línea por carpeta a stdout. Sale 0 si todo quedó al día o se salteó con
+# razón, 1 si una instalación que correspondía falló (sin marca nueva: la próxima
+# corrida reintenta), 2 si <dir> no es un repo git.
 
 set -uo pipefail
 
@@ -69,6 +74,14 @@ while IFS= read -r carpeta; do
     continue
   fi
   manager="$managers"
+  if [ ! -f "${donde}package.json" ]; then
+    echo "deps-al-dia: $donde sin package.json — es un lockfile suelto (¿fixture?), no se instala"
+    continue
+  fi
+  if ! command -v "$manager" >/dev/null 2>&1; then
+    echo "deps-al-dia: $donde $manager no está instalado en esta máquina — no se instala"
+    continue
+  fi
   hash="$(while IFS= read -r l; do git hash-object -- "$l"; done <<< "$propios" | tr '\n' ' ')"
   esperado="$manager $hash"
   if [ -f "$donde$MARCA" ] && [ "$(cat "$donde$MARCA")" = "$esperado" ]; then
