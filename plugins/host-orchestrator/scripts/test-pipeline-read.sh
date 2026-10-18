@@ -139,6 +139,53 @@ espera '"path": "docs/adr/0007-pasarela.md"'   'indexa los ADRs por título y pa
 espera '"prototype_branch": "prototype/checkout-fsm"' 'levanta el puntero al prototipo'
 no_espera 'Stripe como PSP'                    'no arrastra secciones que nadie pidió'
 
+# ------------------------- scope: datos del despacho continuo (spec §3.17) --
+
+printf '\nscope con --base y la perilla de paralelismo\n'
+CHECKOUT="$(mktemp -d)"
+mkdir -p "$CHECKOUT/.host-orchestrator"
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 --dir "$CHECKOUT" > "$SALIDA" 2>&1
+no_espera 'base_por_integrar'        'sin --base no informa la base'
+no_espera '"paralelo"'               'sin el archivo no pide paralelismo'
+no_espera 'No such file'             'sin el archivo no ensucia la salida'
+printf '3\n' > "$FIX/mixto/compare"
+printf '2\n' > "$CHECKOUT/.host-orchestrator/paralelo"
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 --base main --dir "$CHECKOUT" > "$SALIDA" 2>&1
+espera '"base_por_integrar": 3,'     'con --base dice cuántos commits de la base faltan'
+espera '"paralelo": 2,'              'lee la perilla del vigía de cuota'
+printf '0\n' > "$CHECKOUT/.host-orchestrator/paralelo"
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 --base main --dir "$CHECKOUT" > "$SALIDA" 2>&1
+no_espera '"paralelo"'               'un cero no es un paralelismo: se ignora'
+printf '{"five":{"used_percentage":18,"resets_at":1792367400},"week":{"used_percentage":46,"resets_at":1792792800},"at":1792353708.705587}\n' > "$CHECKOUT/cuota.json"
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 --cuota "$CHECKOUT/cuota.json" > "$SALIDA" 2>&1
+espera '"cuota": {"cinco_h": 18, "cinco_h_reinicia": 1792367400, "semanal": 46, "semanal_reinicia": 1792792800, "medida": 1792353708, "leida": ' 'traduce la lectura de la statusline'
+printf 'medio escrito {"five":{' > "$CHECKOUT/cuota.json"
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 --cuota "$CHECKOUT/cuota.json" > "$SALIDA" 2>&1
+no_espera '"cuota"'                  'una lectura ilegible no sale'
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$SALIDA" && paso 'la salida sigue siendo JSON válido' || fallo 'la salida no parsea'
+rm -f "$FIX/mixto/compare"; rm -rf "$CHECKOUT"
+
+printf '\nscope: un PR mergeado dice si ya pasó por la revisión del pipeline\n'
+HO_FIXTURE_DIR="$FIX/mixto" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 > "$SALIDA" 2>&1
+espera '"number": 101, "title": "Slice A: carrito", "bucket": "DONE", "pr_number": 201, "pr_branch": "issue-101", "revisado": false' 'DONE trae su PR y que todavía no se revisó'
+CON_ETIQUETA="$(mktemp -d)"
+cp "$FIX/mixto/"* "$CON_ETIQUETA/"
+sed 's/^201	closed	true	issue-101	afk-agent-pr	/201	closed	true	issue-101	afk-agent-pr,pipeline-revisado	/' "$FIX/mixto/prs" > "$CON_ETIQUETA/prs"
+HO_FIXTURE_DIR="$CON_ETIQUETA" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 > "$SALIDA" 2>&1
+espera '"pr_number": 201, "pr_branch": "issue-101", "revisado": true' 'con la etiqueta pipeline-revisado, revisado'
+no_espera '"pr_number": 202, "pr_branch": "issue-102", "revisado"' 'un PR abierto no lleva revisado'
+rm -rf "$CON_ETIQUETA"
+
+# -------------------- scope: lo que necesita el carril de merge (spec §3.17) --
+
+printf '\nscope con un PR en conflicto, uno de arreglos y una issue con dos PRs\n'
+HO_FIXTURE_DIR="$FIX/despacho" sh "$CLI" scope milestone:PRD-0016 --rama prd/prd-0016 > "$SALIDA" 2>&1
+bucket 102 MERGE_READY
+espera 'en conflicto: lo resuelve el carril de merge'                 'un conflicto con la rama va al carril de merge, no a Leo'
+bucket 103 IN_REVIEW
+espera '"arreglos": [{"pr_number": 210, "pr_branch": "review/run-pr201", "bucket": "MERGE_READY", "de": 201}]' 'los PRs de arreglos salen aparte, con el PR revisado'
+espera '"number": 101, "title": "Slice A: carrito", "bucket": "DONE", "pr_number": 201' 'DONE nombra el PR mergeado aunque haya otro abierto'
+
 # ------------------------------------- push-auth: qué puede publicar el push --
 # El motor veda .github/workflows/** salvo que esta salida diga que se puede
 # (spec §3.16). Lo que se prueba es la clasificación; el token nunca se imprime.

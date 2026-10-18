@@ -35,17 +35,19 @@ Comando (markdown, delgado):
    └─ Workflow({ scriptPath: <plugin>/workflows/prd-pipeline.js, args })
    │
    ▼
-Script JS (determinístico, corre en background):
-   Fase 0  Setup        agente serializador: crea/actualiza rama prd/X, baseline
-   Loop    Waves        while (hay issues accionables && budget.remaining()):
-     0.    Scout        transporte T3: corre pipeline-read.sh scope → buckets (§3.13c)
-     1.    Refresh      serializador: merge base→prd/X; conflicto → merge-resolver
-     2.    Merge wave   por PR MERGE_READY: validar → merge-resolver → merge (serial)
-     3.    Impl wave    fan-out implementers T1 en worktrees (paralelo)
-     4.    Gate         CÓDIGO JS: compara métricas del validador vs baseline → if
-     5.    Publish      serializador: push + gh pr create por resultado verde (serial)
-   Fase N  Review       review fleet sobre el diff integrado prd/X vs base
-   Fase Z  Cierre       serializador: PR draft prd/X → base + reporte final
+Script JS (determinístico, corre en background) — despacho continuo desde 4.16.0 (§3.17):
+   Setup        serializador: rama prd/X, worktree, deps, push-auth, etiquetas
+   Despachador  cada vez que algo termina: scout (GitHub) → llena carriles libres
+     Implementación  hasta P a la vez: implementer en su worktree → gate (if JS) → publish
+     Merge           serial: integrar = actualizar la rama; árbol aprobado → merge en el
+                     mismo agente; si no, medir → gate → integrar. Conflicto → merge-resolver
+     Revisión        serial: por PR mergeado, un revisor + un aplicador; los arreglos
+                     salen como PR nuevo a la cola de merge
+   Cierre       con todo vacío: PR draft prd/X → base + reporte final
+   (Toda mutación remota pasa por el candado: un serializer por vez.)
+
+Hasta 4.15 el cuerpo era un loop de waves con barrera: scout → refresh → baseline →
+merges → impl wave → publish; y al final una review fleet sobre el diff integrado.
 ```
 
 ### 3.1 Los cuatro roles de agente (tiering pinneado SIEMPRE)
@@ -61,15 +63,17 @@ Script JS (determinístico, corre en background):
 
 | Rol | Rango | Effort | Hace | NO hace |
 |---|---|---|---|---|
-| **scout** | T2–T3 | low | correr `pipeline-read.sh scope` y devolver su stdout (§3.13c) | bucketear él mismo, juicio, mutación |
+| **scout** | T3 (default) | low | correr `pipeline-read.sh scope` y devolver su stdout (§3.13c) | bucketear él mismo, juicio, mutación |
 | **implementer** | T0–T1 | (sesión) | TDD + vertical slice en su worktree (disciplina actual de `parallel-implementer.md`) | push, `gh pr *`, salir del worktree |
 | **fixer mecánico** | T2 | medium | remediación bien especificada y verificable por gate (tipos, lint, codemods) — NO features | ídem implementer |
-| **validator** | T2–T3 | low | ejecuta `wave-validate.sh --json` (o autodetect) y reporta NÚMEROS via schema | decidir si pasa — eso es del script |
-| **serializer** (git-officer) | T1–T2 | medium | TODA mutación remota: push, `gh pr create/merge`, branch ops. Idempotente (check-then-act) | implementar, juzgar código |
+| **validator** | T3 con tests del hook; T2 sin ellos | low | ejecuta `wave-validate.sh --json` (o autodetect) y reporta NÚMEROS via schema | decidir si pasa — eso es del script |
+| **serializer** (git-officer) | T3 (default) | low | TODA mutación remota: push, `gh pr create/merge`, branch ops. Recibe la acción ya decidida y verifica contra GitHub (check-then-act) | implementar, juzgar código, decidir un merge |
 | **merge-resolver** | T0–T1 | xhigh | resolver conflictos con intent packet; 5 criterios de no-regresión (sin cambios vs v3) | mergear él mismo (reporta; el serializer ejecuta) |
-| **reviewers/judge** (§3.7) | T0–T1 | xhigh | revisar el diff integrado / fallar cada hallazgo | aplicar (eso es de appliers T1–T2) |
+| **revisor** (§3.7) | T0–T1 | xhigh | revisar UN PR mergeado y decidir cada hallazgo (aplicar / humano / seguimiento) | aplicar (eso es del aplicador T1–T2) |
 
 **Regla dura:** ningún `agent()` sin modelo explícito (resuelto desde el tier via `model_map`). La lección del host-sin-pinnear muere acá: el "host" ahora es código, no tiene modelo.
+
+**Lo mecánico en Haiku (4.16.0, decisión de Leo):** scout, validator y serializer corren en T3 por defecto (`TIER_DEFAULT` en el motor), y `args.tiers` los sube a Sonnet sin editar el motor. Tres guardas: (a) el validator corre en T2 mientras la última medición no muestre que el hook trae los tests (`tests_fuente: 'hook'`): sin hook lee la salida cruda del runner, y ahí Haiku puede leer un falso verde; (b) el serializer recibe la acción ya decidida y la verifica contra GitHub —la decisión de mergear es una comparación de strings que el motor arma y el shell ejecuta (§3.17)—; (c) el tier sigue siendo configurable por rol. Haiku 5.5 acepta `effort` igual que el resto. El implementer declara caché de prompt de 1 h (`experimental.cacheTtl: 1h` en su agente, Claude Code ≥ 2.1.248; los agentes de Workflow van a 5 min si no): espera minutos al typecheck o a los tests, y con 5 min la caché vencía.
 
 **Evidencia del Piloto 1 (2026-07-17, 53 agentes):** fixers T2 (sonnet) 9/9 gates sin reintentos en remediación mecánica (~42k output/nodo); validator T3 (haiku) 25/25 mediciones (~2k out); serializer T2 14/14. El costo real de un fixer son sus **cache-reads** (~35M/nodo), no su output — el tier del modelo importa menos que la cantidad de nodos y re-lecturas. De ahí el rol "fixer mecánico" T2.
 
@@ -83,7 +87,7 @@ El effort es configurable por rol (`role_efforts` → `args.efforts`) y por issu
 |---|---|---|
 | scout, validator, **serializer** | `low` | ejecutan (gh/git/tests) y reportan números; no hay juicio que comprar |
 | implementer, applier | `medium` | escriben código bajo gate numérico; el retry cubre el resto |
-| resolver, particionador, reviewer, judge | `xhigh` | **error asimétrico**: el gate es puramente numérico (§3.3), así que un falso negativo del reviewer no lo recupera nadie aguas abajo; y como el output pesa ~6% del costo (autopsia abajo), subirles el effort es barato |
+| resolver, reviewer | `xhigh` | **error asimétrico**: el gate es puramente numérico (§3.3), así que un falso negativo del revisor no lo recupera nadie aguas abajo; y como el output es la parte chica del costo (autopsia abajo), subirles el effort es barato |
 
 **Autopsia de 4 corridas reales (2026-07-27, App.SaltaCompra — método: `usage` por agente en `~/.claude/projects/*/subagents/workflows/wf_*/agent-*.jsonl`, clasificado por prompt):**
 
@@ -108,7 +112,7 @@ En `wf_d04b8e8f` los reviewers pesan 64% del total pero su output ponderado es ~
 
 ### 3.2 Doctrina "host owns all mutations" → etapa serializadora
 
-El script no tiene FS/git. La doctrina se re-expresa: **toda mutación remota corre en agentes `serializer` despachados secuencialmente por el script** (`await` uno por uno — el orden lo garantiza el código, no la disciplina del modelo). Los implementers siguen sin poder pushear (constraint triple-declarado en su prompt, como hoy).
+El script no tiene FS/git. La doctrina se re-expresa: **toda mutación remota corre en agentes `serializer` de a uno**. Con waves alcanzaba un `await` tras otro; con despacho continuo (§3.17) varios carriles piden mutar a la vez, así que `serializar()` pasa por un **candado** (`crearCandado`, núcleo puro): orden de llegada, uno por vez, y uno que falla no traba al siguiente. No hay otra forma de llamar a un serializer. Los implementers siguen sin poder pushear (constraint triple-declarado en su prompt, como hoy).
 
 Cada mutación es **check-then-act** (idempotente): antes de `gh pr create`, verificar si ya existe PR para esa branch; antes de merge, verificar si ya está mergeado. Esto hace el replay del resume seguro (§3.5).
 
@@ -134,7 +138,7 @@ PASA ⇔  tests_propios == verde                      (los tests del slice, todo
 
 - **Tests propios (DECIDIDO en grilling 2026-07-16, opción B):** `tests_propios` = tests en archivos de test tocados por el diff del PR, derivado mecánicamente de `git diff --name-only` + `test_globs` del config (default por runtime). El gate exige además que el diff agregue ≥ 1 test nuevo (anti "slice sin tests"). El auto-reporte del implementer va al audit log pero NUNCA participa del `if`. Ajuste para slices que solo modifican tests existentes: el requisito "≥ 1 test nuevo" se relaja a "≥ 1 test agregado O modificado".
 - **Tests del diff con hook (4.12.1):** con `tests_fuente: "hook"` el validator solo lista los archivos de test del diff (`tests_del_diff`) y no los corre. El motor deriva en JS `tests_del_diff_verdes` = hay al menos uno y ninguno está en `failing_test_files`. Vale solo porque el hook corrió la suite entera (contrato de abajo). Sin hook, el validator los corre como antes. Origen: autopsia `cn-radar-al-dia-0921`, donde el paso del diff volvía a correr bats pesados que el hook ya había medido.
-- **Baseline:** se captura UNA vez por wave, sobre `prd/X` recién refrescada (Fase 1), corriendo el mismo validador. `{metrics: {<nombre>: N, ...}, tests_failed: M, failing_test_files: [paths], lockfiles_ajenos: [paths]}`.
+- **Baseline:** la medición de la integradora de la que parte cada implementación (desde 4.16.0 el implementer arranca del commit vigente al despacharlo, y su gate compara contra ese; hasta 4.15, una vez por wave sobre `prd/X` recién refrescada). `{metrics: {<nombre>: N, ...}, tests_failed: M, failing_test_files: [paths], lockfiles_ajenos: [paths]}`.
 - **Contrato del hook (lugar canónico; 4.12.0):** `scripts/wave-validate.sh --json` emite
   `{"status": "ok" | "error" | "measurement_failed", "metrics": {"ts_errors": N, ...}, "tests": {"failed": M, "failing_test_files": ["test/x.bats", ...]}}`.
   `tests.failing_test_files` son paths relativos a la raíz del repo; el hook puede sumar campos (`failed_names`, …) y el motor los ignora. Si trae `tests.failed` entero y `tests.failing_test_files` lista, **el validator los copia y no corre ninguna suite propia** (`tests_fuente: "hook"`). Si no los trae, corre la suite él (`tests_fuente: "suite"`). **El hook tiene que correr la suite entera**: el motor usa su lista de rojos como verdad sobre todos los tests del repo. Un hook que corre un subconjunto rompe el atajo de abajo y no debe reportar `tests.failing_test_files`. Sin hook → el validator autodetecta el stack (default JS: package manager + typecheck + test; `metrics.typecheck_errors`) y reporta el mismo contrato en su schema de salida.
@@ -143,11 +147,12 @@ PASA ⇔  tests_propios == verde                      (los tests del slice, todo
 - **Lockfiles ajenos (4.12.0):** en toda medición el validator transporta `git ls-files` de los lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`, `bun.lock`) y el motor calcula en JS `lockfiles_ajenos`: los de carpetas donde conviven lockfiles de managers distintos. El gate falla si aparece uno que no estaba en el baseline. Origen: el applier del review de `cn-radar-al-dia-0921` corrió `npm install` en un repo pnpm y coló dos `package-lock.json`. El JS del workflow no tiene harness de tests; `lockfilesAjenos` y `gate` se verificaron extrayéndolas a mano al publicar 4.12.0.
 - **Dependencias iguales al lockfile (4.15.0):** antes de medir, el validator corre `scripts/deps-al-dia.sh` sobre su árbol (lo mismo hacen el Setup, el implementer y el applier antes de trabajar). Por cada carpeta con lockfile trackeado compara el hash del lockfile con la marca que dejó la última instalación (`node_modules/.ho-lockfile`); si cambió o no hay marca, reinstala congelado con el manager de ese lockfile. Una carpeta con lockfiles de dos managers no se toca. Origen: el Setup instalaba solo si faltaba `node_modules` y el baseline no reinstalaba nunca, así que un merge que cambiaba el lockfile dejaba la integradora midiendo con dependencias viejas. Test: `scripts/test-deps-al-dia.sh`.
 - **Medición inválida ≠ éxito (aprendizaje Piloto 1, 2026-07-16):** el contrato DEBE distinguir "medí 0" de "no pude medir". Si la herramienta de medición muere (OOM, crash, output vacío/no parseable), el hook emite `status: "measurement_failed"` — y el gate lo trata como BLOCKED de la medición, NUNCA como métricas en cero. **Se re-mide una vez antes de frenar** (4.15.0, `medirFirme`): una medición rota no es un rojo del código, y en la corrida 1018 un timeout del medidor dejó un PR sano en `merge-blocked`. Vale para el baseline, el gate pre-merge, el gate de la issue (que sin esto re-despachaba al implementer por un problema del medidor) y el de los fixes del review. Origen: en CI, `tsc` murió por OOM y el output vacío se leyó como "0 errores". Un gate-como-código no puede permitir que una medición rota parezca verde.
+- **El implementer corre los tests de su área, no la suite (4.16.0, decisión de Leo).** La suite completa la corre el medidor apenas termina; esperarla minutos vencía la caché del implementer (en `1017b`, 32 reescrituras de contexto de 200–300K, ~16 % del costo). Las pruebas contra proveedores o recursos reales que el repo pide al tocar algo siguen siendo suyas: el medidor no las corre.
 - **La comparación es un `if` en JS.** El validator reporta números; jamás opina. Rojo → no PR, worktree conservado, label + comment en la issue (via serializer), igual que hoy.
 
 ### 3.4 Estado: GitHub única fuente de verdad + journal para resume
 
-- **Se elimina `state.json`** como fuente de verdad. El scout deriva el estado real de GitHub al inicio de cada wave (barato: T3 + `gh --json`).
+- **Se elimina `state.json`** como fuente de verdad. El scout deriva el estado real de GitHub en cada vuelta del despachador (barato: T3 + `gh --json`).
 - **El journal del Workflow** (`journal.jsonl`) es el mecanismo de resume — no es estado de dominio, es cache de ejecución.
 - **`PROGRESS.md` se elimina** (existía para sobrevivir compacts; el script no compacta). La narrativa humana ahora es `log()` + la ventana `/workflows` + el reporte final.
 - **El audit log `.host-orchestrator/waves/<TS>.log` SE CONSERVA** (append-only, lo escribe el serializer en cada mutación). Es el post-mortem en disco, independiente del journal de la sesión.
@@ -163,10 +168,25 @@ Restricción heredada: sin `Date.now()` en el script → timestamps entran por `
 ### 3.6 Refresh de la rama milestone
 
 - **Merge, no rebase** — `prd/X` es compartida (PRs de issues le apuntan); rebase reescribiría historia bajo PRs abiertos.
-- Antes de cada wave: serializer hace `git fetch && git merge origin/<base>` en `prd/X`.
+- Antes de integrar un PR, si el scout dice que la base se movió (`base_por_integrar > 0`): serializer hace `git fetch && git merge origin/<base>` en `prd/X` (hasta 4.15, antes de cada wave; en `1017b`, 19 de 19 refresh dieron "ya_estaba").
 - **Conflicto** → despachar `merge-resolver` (T1, intent packet = qué trae la base vs qué lleva la rama). Si resuelve → serializer commitea y pushea. Si `INCOMPATIBLE` → el workflow **frena esa corrida** con estado BLOCKED + reporte claro (no intenta heroísmos: conflictos de a cucharadas era el objetivo del refresh frecuente; uno incompatible es señal de que Leo debe mirar).
 
-### 3.7 Review fleet final
+### 3.7 Revisión por PR: un revisor y un aplicador (4.16.0, decisión de Leo)
+
+**Cada PR mergeado a la integradora entra a un carril de revisión propio**, serial, que corre al lado de las implementaciones: un **revisor** (T1, `xhigh`, solo lee) sobre ese PR, y si encontró algo para aplicar, un **aplicador** que lo aplica en un worktree aislado desde la integradora vigente. Los arreglos pasan el gate (no-regresión + paths vedados) y salen como **PR nuevo** (`review-fix`) a la cola de merge normal; no se vuelven a revisar. La revisión no frena las cadenas: el PR ya está mergeado y lo que destrabó se despacha igual. Al final del lote no hay otra revisión; el PR final se abre con la cola de revisión vacía.
+
+**Es la única revisión**, y cuenta como la de ventana limpia que pide la doctrina para lo de una vía: el revisor es independiente de quien escribió el código. Reemplaza a la flota (particionador + 2 lentes por unidad + integración + eje spec + juez + aplicador por tandas): ~17–19 Opus en `xhigh`, el 73 % del costo de una corrida de un ticket, seguida de otro `/code-review` sobre el mismo diff.
+
+**El revisor decide en el mismo turno**, con el umbral que antes tenía el juez: `aplicar` solo para bug real, seguridad, requisito incumplido o contrato roto, con un arreglo local; `humano` para lo que cambia la forma de una respuesta, payload o tipo compartido entre capas (el consumidor puede tener su copia de los tipos) y para el scope creep; `seguimiento` para lo de debajo del umbral, que el PR final lista. Lee el diff del PR (`gh pr diff`) y el contexto en el commit del merge (`git show <merge>:<path>`), no en un working tree que otro carril está moviendo, más el ticket y la escalera de intención del spec padre.
+
+**Los arreglos cierran la revisión.** Con arreglos publicados, el comentario y la etiqueta `pipeline-revisado` esperan a que el PR de arreglos entre o quede `merge-blocked` (en ese caso, también en `para_leo`), y el registro dice cuál de las dos. Una revisión que no corrió o se salteó por budget lo dice en el PR final; no figura como limpia.
+
+**Registro, para poder medir si se pierde algo** (la flota encontró 9 bugs reales en la corrida 1017: huella dependiente del idioma, tope de 65.534 parámetros, importar que duplica): por PR queda qué encontró el revisor —cada hallazgo con su decisión y razón— y qué aplicó o no el aplicador, en tres lugares: un comentario en el PR revisado, el reporte del workflow (`revisiones`) y una sección «Revisión por PR» en el PR final. La etiqueta `pipeline-revisado` en el PR es además el estado que lee un relanzamiento: un PR mergeado sin ella se revisa, aunque lo haya mergeado otra corrida.
+
+<!-- acta -->
+Hasta 4.15 —para la historia—:
+
+#### La review fleet (≤ 4.15)
 
 **DECIDIDO (grilling 2026-07-16, opción A):** fase nativa del workflow — reviewers (fan-out por superficie) → judge → appliers, con los prompts de review-fleet PORTADOS a host-orchestrator, sobre el diff integrado `prd/X..base`. Los fixes aprobados van en UN commit/PR `review/<slug>` → `prd/X` que pasa por el mismo gate. Motor autocontenido y publicable; la revisión hereda pinneo de modelos, orden y presupuesto.
 
@@ -178,13 +198,15 @@ Contexto de la decisión: la v4 tiene vocación de **reemplazar el flujo de impl
 
 **Package manager (4.12.0):** implementer, applier y serializers que instalan usan el manager del lockfile existente de cada carpeta y solo crean o tocan ese lockfile (`REGLA_DEPS` en el motor). El applier trabaja con las dependencias instaladas y reinstala solo si el fix es de dependencias. El gate lo respalda con `lockfiles_ajenos` (§3.3).
 
-#### 3.7b Alcance de lectura pre-filtrado
+##### Alcance de lectura pre-filtrado
 
 Cada reviewer **por unidad** corre `git diff origin/<base>...HEAD -- <paths de SU unidad>` en vez del diff integrado completo (la excepción es el eje Spec de §3.13d, que por diseño necesita verlo entero) (fallback `.` si el particionador no reportó paths: degrada el ahorro, nunca la cobertura). Sin esto, los 13-15 reviewers releen el mismo diff completo y cada uno paga ~2,5M de contexto. Mismas unidades, mismas lentes, mismo modelo: solo se deja de pagar N veces lo mismo.
 
-#### 3.7c Applier por tandas
+##### Applier por tandas
 
 El applier aplica los fixes del juez en tandas de `applier_chunk` (default 4). La tanda 1 crea el worktree aislado (`review/<runLabel>`); las siguientes hacen `cd` al mismo worktree y branch, con **contexto fresco**, y el script acumula `aplicadas`/`falladas`. Si una tanda muere, lo aplicado se conserva y los fixes de esa tanda van a `humano`. Motivo (autopsia §3.1b): el applier único de la corrida `prd0019-0722` corrió 491 turnos con el contexto creciendo de 44k a 462k → 115M de tokens leídos, 39% del costo de la corrida entera en un solo agente. Mismos fixes, mismo orden, mismo gate.
+
+<!-- /acta -->
 
 ### 3.8 Entrada, `cc-afk` y permisos
 
@@ -283,7 +305,7 @@ POSIX sh usando solo `gh` (su `--jq` incorporado evita el jq externo). Tres subc
 
 | | qué devuelve | quién lo corre |
 |---|---|---|
-| `scope <tipo:valor> --rama <r>` | el JSON del `SCOUT_SCHEMA` ya bucketeado | T0 en el pre-flight; el transporte por wave |
+| `scope <tipo:valor> --rama <r>` | el JSON del `SCOUT_SCHEMA` ya bucketeado | T0 en el pre-flight; el transporte en cada vuelta |
 | `check <tipo:valor>` | precondiciones, con los `gh api` exactos del remedio | T0, antes de crear ninguna rama |
 | `intent <issue>` | spec padre (`out_of_scope` + `testing_decisions`), índice de ADRs, rama de prototipo | implementer de entrada; merge-resolver bajo disparador |
 | `push-auth` | cómo se autentica el push a `origin` (`via`, `tipo` de token, `scopes` si es clásico); nunca imprime el token | el serializer del Setup (§3.16) |
@@ -304,13 +326,13 @@ Tres trampas de sh que costaron una corrida cada una y quedan cubiertas por el t
 
 Sus seis reglas de bucketing eran booleanas y ninguna necesita el body: hoy pedía `--json …,body --limit 200`, metiendo hasta 200 bodies en un contexto LLM por wave para responder seis booleanos. Ahora corre el CLI y devuelve stdout — un turno, T3, effort low. **La wave 1 ni eso**: reusa el `scopeInicial` que T0 ya trajo en el pre-flight. La frescura por wave se conserva: el estado cambia entre waves y por eso las siguientes vuelven a correr el comando.
 
-#### 3.13d Eje Spec en la review fleet: +1 reviewer, no +6
+#### 3.13d Eje Spec en la review fleet: +1 reviewer, no +6 (≤ 4.15; desde 4.16.0 el eje spec es una de las lentes del revisor de cada PR, §3.7)
 
 La fleet no tenía eje Spec. Entra **un solo** reviewer sobre el **diff integrado completo** (el único que lo ve entero, contra el pre-filtrado de §3.7b) porque el scope creep es una pregunta de *todo el diff contra todo el spec*: fragmentarlo por unidad le da a cada reviewer un pedazo de cada uno, que es la receta del falso positivo — "esto no lo pidió nadie" cuando sí, en la sección que no le tocó. Los specs salen de los `parent_issue_url` distintos del scope, así que un milestone que cruza dos specs los recibe a los dos.
 
 **Ruteo:** sus hallazgos de scope creep entran al juez pero van a **HUMANO, nunca a APLICAR** — "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los que señalan un requisito *incumplido* sí pueden ir a APLICAR. Precondición del ruteo: la lente se pega a cada finding **antes** de filtrar los reviewers muertos; filtrando primero, un reviewer caído corre los índices y etiqueta mal todo lo que sigue.
 
-### 3.14 Guardia de cierre y disciplina del serializer (4.6.0, corrida `prd-0030-0818`)
+### 3.14 Guardia de cierre y disciplina del serializer (4.6.0, corrida `prd-0030-0818`; el tope de waves desaparece en 4.16.0, §3.17)
 
 **El tope de waves no puede tirar la corrida entera.** Hasta 4.14 un eslabón serial costaba DOS waves —implementar y mergear— así que una cadena de 5 con `maxWaves=10` consumía el tope justo al terminar de implementar. Con `all_done` decidiéndose sólo al ABRIR una wave, ese final era el peor posible: 7 issues DONE, sin review fleet y sin PR final; todo el gasto hecho y nada del cierre. Al agotarse el tope corre **un scout más** —el rol más barato— que distingue *no llegué* de *llegué justo en la última*: si el scope quedó completo, la corrida sigue a Review y PR final; si no, el reporte sale con status `WAVE_CAP` y el piso a usar (`eslabones_seriales + 2`), que es dato distinto de un corte por budget. El complemento está del lado del comando: ese piso se calcula antes de lanzar.
 
@@ -376,6 +398,30 @@ En la primera pasada sobre el commit roto, sin regla de precondiciones, también
 **Re-despacho por hecho nuevo:** cada intento usa su propia branch (`issue-N`, después `issue-N-v2`…), porque la del intento anterior sigue checkouteada en su worktree conservado; el PR se liga a la issue por el `Closes #N` del body. Si lo que se había bloqueado era la publicación, destrabarla republica ese worktree en vez de reimplementar. El Setup crea las etiquetas con las que el motor marca (`agent-blocked`, `merge-blocked`, `review-fix`): sin ellas marcar falla y un relanzamiento reimplementaría.
 
 Tests: `tests/motor.test.mjs` corre el motor contra un mundo simulado donde la publicación de una issue falla siempre, el implementer muere, el merge falla o alguien saca la etiqueta; `scripts/test-pipeline-read.sh` cubre `push-auth` con fixtures.
+
+### 3.17 Despacho continuo (4.16.0, decisión de Leo)
+
+**Sin barrera.** El motor dejó de correr en waves: P carriles de implementación, un carril de merge serial y uno de revisión serial (§3.7), alimentados por un despachador. Cada vez que algo termina —una implementación publicada, un merge, una revisión— suena el timbre (`crearTimbre`), el despachador vuelve a leer GitHub con el scout y llena los carriles libres con lo que esté `IMPLEMENTABLE`. Con barrera cada wave duraba lo que la implementación más lenta (de 12 a 70 min medidos); la simulación sobre las duraciones reales de 1017b/1018 dio −45 % de reloj. Un merge recalcula lo habilitado y lo despacha en la misma vuelta.
+
+**Cada implementación parte de un commit fijo**: el de la integradora vigente cuando se la despachó (`git checkout -B issue-N <commit>`), y su gate compara contra la medición de ese árbol. La integradora la tocan solo el carril de merge (integrar, refrescar) y la medición de su base, nunca dos cosas a la vez.
+
+**Integrar un PR en un agente.** Si el árbol que queda al actualizar el PR con la integradora es el que el motor ya midió para ese PR (el del gate de su issue, o el de una medición anterior) y pasa la no-regresión contra la base, se mergea en el mismo agente. La condición la calcula el motor (`arbolAprobado`) y le llega al serializer como un `case` de shell con **un** árbol (`MERGEAR`/`NO_MERGEAR`), no como criterio; el serializer verifica el merge contra GitHub, y si mergeó un árbol que no era el aprobado queda un aviso en `para_leo`. Si el árbol es nuevo: se mide, decide el gate, y la integración siguiente lo mergea. Después del merge, si el mismo agente reportó que el árbol mergeado es el aprobado y que la integradora quedó en ése (con squash son el mismo), la base nueva sale de la memoria sin medir nada; si no, se mide declarando el árbol esperado (el shell del medidor lo verifica). El refresh corre solo si el scout reporta `base_por_integrar > 0`. El merge-resolver (Opus) entra solo con conflicto real. Escenario del 18/10 (dos PRs a mergear): 11 agentes Sonnet de ~45K pasan a 3–4 agentes Haiku livianos (scout, integrar, y medir + integrar si el segundo cambió de árbol).
+
+**Una foto vieja no se actúa.** El scout puede salir con el estado de antes de que terminara algo: un reloj lógico (`eventos`, `terminoEn`) descarta esas entradas, y la corrida solo termina con una foto posterior al último evento y nada en vuelo. **Y no se despacha con la integradora en movimiento**: desde que un integrar puede mergear hasta que la base nueva queda fijada, un scout puede ver al bloqueante DONE con `base` todavía sin su código, y la dependiente saldría de una base que no lo tiene (lo encontró la revisión de 4.16.0). El carril de merge toca el timbre después de fijar la base.
+
+**Un PR en conflicto con la rama va al carril de merge**, no a Leo: dos slices que salen del mismo commit chocan apenas entra el primero, y eso lo resuelve el merge-resolver. `pipeline-read.sh` lo deja en `MERGE_READY` (rojo es solo checks en rojo o `merge-blocked`).
+
+**Un merge que el motor no aprobó se vigila.** El merge es un único comando (`push` → soltar la branch → `gh pr merge --match-head-commit`) que se corta si una parte falla. Si igual entra un árbol que no era el aprobado (un serializer que desobedece, un `ya_estaba` inesperado), la base nueva se mide y se compara con la anterior: si empeoró, la corrida se frena y queda para Leo, en vez de adoptar el rojo como base. Liberar una branch checkouteada en otro worktree también es un comando de shell, no un criterio: si el worktree tiene trabajo que no está en el remoto, no se toca.
+
+**El estado sigue saliendo de GitHub** y toda mutación es check-then-act: matar y relanzar no rehace lo publicado ni lo mergeado, y la etiqueta `pipeline-revisado` dice qué PR mergeado falta revisar. Los PRs de arreglos (`review-fix`) no cierran issues, así que `pipeline-read.sh` los lista aparte (`arreglos`, con el PR revisado) y el motor los integra aunque los haya abierto otra corrida. Lo que estaba en vuelo sin publicar se rehace (su worktree queda en disco). Un scope mergeado por ≤ 4.15 no tiene la etiqueta en ningún PR: relanzado con 4.16 se revisa PR por PR (decisión de Leo si se etiquetan a mano antes).
+
+**Resume:** el journal del Workflow encadena las llamadas por hash en orden de invocación (verificado contra Claude Code 2.1.302: tras el primer miss, todo corre en vivo). Con despacho continuo ese orden depende de qué termina primero, así que `resumeFromRunId` reusa como mucho el arranque; después del primer evento en otro orden se comporta como una corrida fresca, que es lo que el comando recomienda.
+
+**Paralelismo en caliente.** P = el menor entre `maxParallel` (default 3), la perilla `.host-orchestrator/paralelo` del repo (la escribe Leo o el T0) y el **vigía de cuota** (`crearVigia`). El vigía lee lo que la statusline deja de `rate_limits` (`args.cuota`, típicamente `~/.cache/claude-cuota.json`; el scout lo trae junto con la hora): con la ventana de 5 h sobre `umbral5h` (85) o la semanal sobre `100 − reservaSemanal` (90), un carril; con la velocidad medida —% gastado por carril-hora desde la primera lectura de la ventana, con al menos media hora de datos—, los carriles que llegan a cada reinicio sin pasar su tope. Nunca baja de 1. Con el dato del 18/10 (semanal al 46 % a 5 días del reinicio, ~1,3 %/h por carril) el vigía deja un carril: proyecta hasta el reinicio, que es lo conservador. `cuotaUmbrales.horizonteHoras` acorta el horizonte (con 8 h, P vuelve a 3) — cuál usar es decisión de Leo. La velocidad se calcula con los carriles que quedaron corriendo después de cada despacho, y una lectura de más de 10 min (`leida − medida`) no se usa: se mantiene la última decisión. Lo que no puede saber no lo inventa: sin lectura, con la ventana vencida o sin datos suficientes, no baja por eso. La lectura la escribe la statusline de la sesión, que mientras la sesión espera al workflow solo se re-ejecuta con `refreshInterval` en su config (verificado en Claude Code 2.1.302; la Mac lo tiene en 30 s; la devbox no se verificó). Nunca se abren más carriles que issues habilitadas.
+
+**Tope de presupuesto:** debajo de `minBudgetWave` de output restante no se despacha trabajo nuevo ni se empiezan revisiones; lo que está en vuelo termina, y el reporte sale `BUDGET_CUT` (o `DONE`, con las revisiones pendientes listadas). `maxWaves` ya no existe: el registro (§3.16) acota cuántas veces se intenta cada trabajo, y la corrida termina cuando no queda nada en vuelo.
+
+Tests: `tests/motor.test.mjs` prueba con el motor real contra el mundo simulado que una implementación lenta no frena a la cadena de al lado, que nunca hay más de P implementaciones a la vez ni más que las habilitadas, que la perilla y el vigía bajan P, que dos serializers nunca corren a la vez, que un PR sin cambios entra con un agente, que el refresh y la medición de la base se saltean cuando no hacen falta, que la revisión corre al lado sin frenar la cadena y que un relanzamiento revisa lo mergeado sin revisar.
 
 ## 4. Migración v3 → v4
 

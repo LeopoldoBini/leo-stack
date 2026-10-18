@@ -2,7 +2,7 @@
 #
 # pipeline-read.sh — el lado de LECTURA del pipeline AFK v4 (leo-stack #10 §5).
 #
-#   uso: pipeline-read.sh scope  <tipo:valor> --rama <rama> [opciones]
+#   uso: pipeline-read.sh scope  <tipo:valor> --rama <rama> [--base <rama>] [--cuota <archivo>] [opciones]
 #        pipeline-read.sh check  <tipo:valor> [opciones]
 #        pipeline-read.sh intent <n> [opciones]
 #        pipeline-read.sh push-auth [--dir <checkout>]
@@ -33,6 +33,8 @@ SUB=""
 ARG=""
 SLUG=""
 RAMA=""
+BASE_REF=""
+CUOTA=""
 DIR="."
 LABEL_READY="ready-for-agent"
 LABEL_AGENT_PR="afk-agent-pr"
@@ -62,6 +64,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo-slug) SLUG="${2:-}"; shift 2 ;;
     --rama)      RAMA="${2:-}"; shift 2 ;;
+    --base)      BASE_REF="${2:-}"; shift 2 ;;
+    --cuota)     CUOTA="${2:-}"; shift 2 ;;
     --dir)       DIR="${2:-}";  shift 2 ;;
     --label-ready)    LABEL_READY="${2:-}";    shift 2 ;;
     --label-agent-pr) LABEL_AGENT_PR="${2:-}"; shift 2 ;;
@@ -309,7 +313,43 @@ cmd_scope() {
     printf '%s\t%s\n' "$n" "$b"
   done > "$TMP/deps"
 
-  awk -F'\t' -v rama="$RAMA" -v lready="$LABEL_READY" -v lpr="$LABEL_AGENT_PR" "$AWK_JSON"'
+  # Dos datos para el despacho continuo (spec §3.17), opcionales: si no se pueden
+  # leer, el campo no sale y el motor hace lo conservador (refrescar; maxParallel).
+  #  - base_por_integrar: commits de la base que la integradora todavía no tiene.
+  #    En 0, el refresh no tiene nada que traer (en 1017b, 19 de 19 dieron "ya_estaba").
+  #    No usa `consulta`: una rama que todavía no existe da 404, y eso no es un error.
+  #  - paralelo: lo que pide `.host-orchestrator/paralelo` del checkout, si es un
+  #    entero ≥ 1. Es la perilla del vigía de cuota para bajar P en caliente.
+  porIntegrar=""
+  if [ -n "$BASE_REF" ]; then
+    if [ -n "${HO_FIXTURE_DIR:-}" ]; then
+      porIntegrar="$(cat "$HO_FIXTURE_DIR/compare" 2>/dev/null)"
+    else
+      porIntegrar="$(gh api --method GET "repos/$SLUG/compare/$RAMA...$BASE_REF" --jq .ahead_by </dev/null 2>/dev/null)"
+    fi
+    case "$porIntegrar" in ''|*[!0-9]*) porIntegrar="" ;; esac
+  fi
+  paralelo=""
+  [ -f "$DIR/.host-orchestrator/paralelo" ] && paralelo="$(tr -d ' \n\r' < "$DIR/.host-orchestrator/paralelo")"
+  case "$paralelo" in ''|*[!0-9]*|0) paralelo="" ;; esac
+
+  #  - cuota: la última lectura de rate_limits que dejó la statusline en <archivo>
+  #    ({"five":{"used_percentage","resets_at"},"week":{…},"at"}), más la hora de
+  #    ahora: el motor no tiene reloj y necesita saber cuán vieja es (§3.17).
+  cuota=""
+  if [ -n "$CUOTA" ] && [ -f "$CUOTA" ]; then
+    c="$(tr -d ' \n\r' < "$CUOTA")"
+    campo() { printf '%s' "$c" | sed -n "s/.*\"$1\":{\([^}]*\)}.*/\1/p" | sed -n "s/.*\"$2\":\([0-9.]*\).*/\1/p" | cut -d. -f1; }
+    c5="$(campo five used_percentage)"; r5="$(campo five resets_at)"
+    cw="$(campo week used_percentage)"; rw="$(campo week resets_at)"
+    at="$(printf '%s' "$c" | sed -n 's/.*"at":\([0-9]*\).*/\1/p')"
+    if [ -n "$c5" ] && [ -n "$cw" ] && [ -n "$at" ]; then
+      cuota="{\"cinco_h\": $c5, \"cinco_h_reinicia\": ${r5:-0}, \"semanal\": $cw, \"semanal_reinicia\": ${rw:-0}, \"medida\": $at, \"leida\": $(date +%s)}"
+    fi
+  fi
+
+  awk -F'\t' -v rama="$RAMA" -v lready="$LABEL_READY" -v lpr="$LABEL_AGENT_PR" \
+      -v porintegrar="$porIntegrar" -v paralelo="$paralelo" -v cuota="$cuota" "$AWK_JSON"'
   FILENAME ~ /prs$/ {
     pn = $1; pestado[pn] = $2; pmerged[pn] = ($3 == "true"); phead[pn] = $4; plabels[pn] = $5
     n = split($6, refs, ",")
@@ -344,14 +384,20 @@ cmd_scope() {
 
     for (i = 1; i <= cant; i++) {
       n = num[i]
-      prMerged = 0; prAbierto = 0; prNum = ""; prBranch = ""; prLabels = ""
+      prMerged = 0; prAbierto = 0; prNum = ""; prBranch = ""; prLabels = ""; mNum = ""; mBranch = ""
       for (j = 1; j <= np; j++) {
         p = orden[j]
         if (!(p "|" n in liga)) continue
-        if (pmerged[p]) { prMerged = 1; if (prNum == "") { prNum = p; prBranch = phead[p] } }
+        if (pmerged[p]) { prMerged = 1; if (mNum == "") { mNum = p; mBranch = phead[p] } }
         else if (pestado[p] == "open") { prAbierto = 1; prNum = p; prBranch = phead[p]; prLabels = plabels[p] }
       }
-      rojo = (pmergeable[prNum] == "CONFLICTING") || (pfail[prNum] > 0) || tiene(prLabels, "merge-blocked")
+      # DONE habla del PR mergeado, aunque la issue tenga además otro abierto.
+      if (prMerged) { prNum = mNum; prBranch = mBranch }
+      # En conflicto con la rama NO es rojo (spec §3.17): dos slices que salen del
+      # mismo commit chocan apenas entra el primero, y eso lo resuelve el carril de
+      # merge con el merge-resolver. Rojo es lo que pide a Leo: checks en rojo o
+      # la etiqueta merge-blocked.
+      rojo = (pfail[prNum] > 0) || tiene(prLabels, "merge-blocked")
 
       # vivos = bloqueantes que bloquean de verdad; hechos = los descontados por
       # PR mergeado a la rama. Sin lista de deps (no debería pasar con bloq > 0),
@@ -375,12 +421,12 @@ cmd_scope() {
       } else if (tiene_prefijo(labels[i], "agent-blocked")) {
         b = "HUMAN_GATED"; d = "label agent-blocked"
       } else if (prAbierto && tiene(prLabels, lpr) && !rojo) {
-        b = "MERGE_READY"; d = "PR #" prNum " abierto y verde hacia " rama
+        b = "MERGE_READY"
+        d = "PR #" prNum " abierto hacia " rama (pmergeable[prNum] == "CONFLICTING" ? ", en conflicto: lo resuelve el carril de merge" : " y verde")
       } else if (prAbierto) {
         b = "IN_REVIEW"
         d = "PR #" prNum " abierto pero " (tiene(prLabels, "merge-blocked") ? "con label merge-blocked" \
-            : (pmergeable[prNum] == "CONFLICTING" ? "en conflicto" \
-            : (pfail[prNum] > 0 ? pfail[prNum] " check(s) en rojo" : "sin label " lpr)))
+            : (pfail[prNum] > 0 ? pfail[prNum] " check(s) en rojo" : "sin label " lpr))
       } else if (vivos > 0) {
         b = "BLOCKED_BY_DEP"
         d = vivos " bloqueante(s) abierto(s) en el grafo nativo"
@@ -399,7 +445,10 @@ cmd_scope() {
       cuenta[b]++
       if (b == "SPEC") specs[n] = 1
       if (padre[i] != "") specs[padre[i]] = 1
-      if (b == "MERGE_READY" || b == "IN_REVIEW") { prOut[i] = prNum; brOut[i] = prBranch }
+      if (b == "MERGE_READY" || b == "IN_REVIEW" || b == "DONE") { prOut[i] = prNum; brOut[i] = prBranch }
+      # DONE: ¿la revisión del pipeline ya pasó por ese PR? (spec §3.17: un PR
+      # mergeado sin la etiqueta se revisa, aunque lo haya mergeado otra corrida)
+      if (b == "DONE") revOut[i] = (tiene(plabels[prNum], "pipeline-revisado") ? "true" : "false")
     }
 
     todo = (cuenta["MERGE_READY"] + cuenta["IMPLEMENTABLE"] + cuenta["IN_REVIEW"] == 0 && cuenta["DONE"] > 0)
@@ -408,6 +457,7 @@ cmd_scope() {
     for (i = 1; i <= cant; i++) {
       printf "    {\"number\": %s, \"title\": \"%s\", \"bucket\": \"%s\"", num[i], jesc(titulo[i]), bucket[i]
       if (prOut[i] != "") printf ", \"pr_number\": %s, \"pr_branch\": \"%s\"", prOut[i], jesc(brOut[i])
+      if (revOut[i] != "") printf ", \"revisado\": %s", revOut[i]
       if (deps[num[i]] != "") printf ", \"blocked_by\": [%s]", deps[num[i]]
       if (padre[i] != "") printf ", \"parent\": %s", padre[i]
       printf ", \"detalle\": \"%s\"}%s\n", jesc(detalle[i]), (i < cant ? "," : "")
@@ -420,9 +470,27 @@ cmd_scope() {
     for (a = 2; a <= ns; a++) { v = lista[a]; b2 = a - 1
       while (b2 >= 1 && lista[b2] > v) { lista[b2 + 1] = lista[b2]; b2-- }
       lista[b2 + 1] = v }
-    printf "  ],\n  \"specs\": ["
+    # Los PRs de arreglos de una revisión (etiqueta review-fix) no cierran ninguna
+    # issue, así que no salen por issue: van aparte, para que el motor los integre
+    # aunque se haya cortado la corrida que los abrió (spec §3.7).
+    printf "  ],\n  \"arreglos\": ["
+    na = 0
+    for (j = 1; j <= np; j++) {
+      p = orden[j]
+      if (pestado[p] != "open" || !tiene(plabels[p], "review-fix")) continue
+      de = phead[p]
+      if (match(de, /-pr[0-9]+$/)) de = substr(de, RSTART + 3); else de = ""
+      rojoA = (pfail[p] > 0) || tiene(plabels[p], "merge-blocked")
+      printf "%s{\"pr_number\": %s, \"pr_branch\": \"%s\", \"bucket\": \"%s\"%s}", (na++ ? ", " : ""), p, jesc(phead[p]), \
+             (rojoA ? "IN_REVIEW" : "MERGE_READY"), (de != "" ? ", \"de\": " de : "")
+    }
+    printf "],\n  \"specs\": ["
     for (a = 1; a <= ns; a++) printf "%s%s", (a > 1 ? ", " : ""), lista[a]
-    printf "],\n  \"notas\": \"bucketeado por pipeline-read.sh sobre el grafo nativo de GitHub"
+    printf "],\n"
+    if (porintegrar != "") printf "  \"base_por_integrar\": %s,\n", porintegrar
+    if (paralelo != "") printf "  \"paralelo\": %s,\n", paralelo
+    if (cuota != "") printf "  \"cuota\": %s,\n", cuota
+    printf "  \"notas\": \"bucketeado por pipeline-read.sh sobre el grafo nativo de GitHub"
     printf " (%d issues", cant
     nb = split("DONE SPEC MERGE_READY IN_REVIEW BLOCKED_BY_DEP IMPLEMENTABLE HUMAN_GATED", ordenb, " ")
     for (a = 1; a <= nb; a++) if (cuenta[ordenb[a]] > 0) printf ", %s:%d", ordenb[a], cuenta[ordenb[a]]

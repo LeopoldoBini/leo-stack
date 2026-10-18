@@ -20,7 +20,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 
 | Qué | Dónde |
 |---|---|
-| La spec del motor: arquitectura, roles/tiers, gate ratchet, serializers, resume, review fleet | `docs/SPEC-v4-workflow-engine.md` |
+| La spec del motor: arquitectura, roles/tiers, gate ratchet, serializers, despacho continuo, revisión por PR, resume | `docs/SPEC-v4-workflow-engine.md` |
 | El motor ejecutable | `workflows/prd-pipeline.js` |
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
 | Qué se siembra al adoptar el plugin en un repo, incluida la regla de dependencias entre tickets (pocas waves anchas) | `commands/init.md` |

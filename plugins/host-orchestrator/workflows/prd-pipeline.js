@@ -7,7 +7,9 @@ export const meta = {
   description: 'MOTOR INTERNO del pipeline AFK — NO invocar por nombre: la entrada es el comando /prd-pipeline, que compone args (scope/tiers/rama/budget) como orquestador T0 y lo lanza por scriptPath',
   phases: [
     { title: 'Setup' },
-    { title: 'Review' },
+    { title: 'Despacho', detail: 'carriles de implementación' },
+    { title: 'Merge', detail: 'carril serial' },
+    { title: 'Revisión', detail: 'un revisor y un aplicador por PR mergeado' },
     { title: 'Cierre' },
   ],
 }
@@ -18,8 +20,10 @@ export const meta = {
 // Principios (no negociables):
 //  - Las REGLAS son código JS. El gate es un `if` sobre números de un validator.
 //    CERO decisiones de gate tomadas por un modelo.
-//  - Toda mutación remota corre en serializers secuenciales, check-then-act,
-//    idempotentes por identidad de TRABAJO (PR/issue), no de branch (§3.2).
+//  - Toda mutación remota corre en serializers, de a uno (candado, §3.17),
+//    check-then-act, idempotentes por identidad de TRABAJO (PR/issue), no de branch (§3.2).
+//  - Despacho continuo (§3.17): P carriles de implementación, un carril de merge
+//    serial y uno de revisión; cada evento vuelve a leer el estado de GitHub.
 //  - Tiering pinneado: TODO agent() lleva model explícito resuelto de args (§3.1).
 //  - Sin Date.now(): timestamps entran por args; el audit log lo estampa el serializer.
 //
@@ -31,7 +35,8 @@ export const meta = {
 //   base: 'master',                       // base_branch del config
 //   rama: 'prd/<slug>' | 'batch/<slug>',  // rama integradora (la computa el comando)
 //   models: { T0, T1, T2, T3 },           // model_map del config
-//   tiers: { scout, validator, implementer, serializer, resolver, reviewer, judge, applier },
+//   tiers: { scout, validator, serializer, implementer, resolver, reviewer, applier }
+//                                         // (opcional; defaults en TIER_DEFAULT: lo mecánico en T3),
 //   issueTiers: { '<n>': 'T2', ... },     // override por issue (opcional)
 //   readCli: path absoluto de scripts/pipeline-read.sh (lo resuelve el comando
 //                                         desde ${CLAUDE_PLUGIN_ROOT}),
@@ -41,8 +46,10 @@ export const meta = {
 //   denyPaths: [],                        // ratchets/guards ortogonales (§3.10)
 //   requiredChecks: [],                   // checks de CI a esperar (vacío = no esperar)
 //   labels: { ready: 'ready-for-agent', agentPr: 'afk-agent-pr' },
-//   maxParallel: 6, maxWaves: 8,
-//   budgetTotal: number|null, minBudgetWave: 300000,
+//   maxParallel: 3,                       // techo de carriles de implementación
+//   cuota: '~/.cache/claude-cuota.json' | null, // lectura de rate_limits de la statusline (§3.17)
+//   cuotaUmbrales: { umbral5h: 85, reservaSemanal: 10 },
+//   budgetTotal: number|null, minBudgetWave: 300000, // mínimo de output para despachar trabajo nuevo
 //   testsRojosPreexistentes: []           // paths conocidos (opcional, informativo)
 // }
 // ============================================================================
@@ -81,15 +88,14 @@ function gate(med, base, { exigirTests = true, vedados = [] } = {}) {
   if (exigirTests) {
     if (med.diff_toca_tests !== true) motivos.push('el diff no agrega ni modifica ningún test (anti "slice sin tests")')
     if (med.tests_del_diff_verdes !== true) motivos.push('tests tocados por el diff no están todos verdes')
-    // Los paths vedados (deny_paths del repo + lo que el token no puede publicar)
-    // se hacen cumplir acá, no solo en el prompt: un diff que los toca no se publica.
-    if (vedados.length) {
-      if (!Array.isArray(med.archivos_del_diff)) return { pass: false, deMedicion: true, motivos: ['el medidor no reportó los archivos del diff: no se puede verificar los paths vedados'] }
-      else {
-        const tocados = tocaVedados(med.archivos_del_diff, vedados)
-        if (tocados.length) motivos.push(`el diff toca paths vedados: ${tocados.join(', ')} — sacá esos cambios del slice`)
-      }
-    }
+  }
+  // Los paths vedados (deny_paths del repo + lo que el token no puede publicar) se
+  // hacen cumplir acá, no solo en el prompt: un diff que los toca no se publica. Lo
+  // pide quien mide un diff propio (el de la issue, el de los arreglos de una revisión).
+  if (vedados.length) {
+    if (!Array.isArray(med.archivos_del_diff)) return { pass: false, deMedicion: true, motivos: ['el medidor no reportó los archivos del diff: no se puede verificar los paths vedados'] }
+    const tocados = tocaVedados(med.archivos_del_diff, vedados)
+    if (tocados.length) motivos.push(`el diff toca paths vedados: ${tocados.join(', ')} — sacá esos cambios`)
   }
   return { pass: motivos.length === 0, motivos }
 }
@@ -230,6 +236,129 @@ function crearMemoria() {
   }
 }
 
+// ¿Se puede mergear sin volver a medir un PR cuyo árbol, ya actualizado con la
+// integradora, resulte `arbol`? Sí, si ese árbol está medido y pasa el gate de
+// no-regresión contra `base` (§3.17). Devuelve el árbol aprobado o null. Al agente
+// le llega UNO, y la comparación la hace el shell: con una lista, un error del modelo
+// podía prestarle a un árbol rojo la aprobación de otro (revisión de 4.15.0).
+function arbolAprobado(memoria, base, arbol) {
+  if (!esIdDeGit(arbol)) return null
+  const med = memoria.medicion(arbol)
+  return med && gate(med, base, { exigirTests: false }).pass ? arbol : null
+}
+
+// Tiers por rol (§3.1, 4.16.0). Lo mecánico corre en T3 (Haiku) por defecto y
+// `args.tiers` lo sube sin editar el motor. Guarda: sin los tests del hook, el
+// validator lee la salida cruda del runner de tests, y ahí Haiku puede leer un falso
+// verde; con T3 pedido y sin tests del hook comprobados, el validator corre en T2.
+const TIER_DEFAULT = { scout: 'T3', validator: 'T3', serializer: 'T3', implementer: 'T1', resolver: 'T1', reviewer: 'T1', applier: 'T1' }
+function tierEfectivo(rol, tiers, { testsDelHook = false } = {}) {
+  const t = tiers?.[rol] ?? TIER_DEFAULT[rol]
+  return rol === 'validator' && t === 'T3' && testsDelHook !== true ? 'T2' : t
+}
+
+// Candado (§3.17): las mutaciones remotas pasan de a una, en orden de llegada,
+// aunque las pidan carriles distintos. Una que falla no traba a las siguientes.
+function crearCandado() {
+  let cola = Promise.resolve()
+  return {
+    con(fn) {
+      const turno = cola.then(() => fn())
+      cola = turno.then(() => undefined, () => undefined)
+      return turno
+    },
+  }
+}
+
+// Timbre: cualquier trabajo que termina despierta al despachador. Un aviso sin
+// nadie esperando queda guardado, para no perderse entre dos esperas.
+function crearTimbre() {
+  let guardado = false
+  let despertar = null
+  return {
+    avisar() {
+      if (despertar) {
+        const d = despertar
+        despertar = null
+        d()
+      } else guardado = true
+    },
+    esperar() {
+      if (guardado) {
+        guardado = false
+        return Promise.resolve()
+      }
+      return new Promise((r) => { despertar = r })
+    },
+  }
+}
+
+// Vigía de cuota (§3.17). Lee lo que la statusline dejó de rate_limits —ventana de
+// 5 h y semanal— y baja el paralelismo en caliente, nunca por debajo de 1:
+//  - arriba del umbral de 5 h, o de 100 − reserva en la semanal: un carril;
+//  - con la velocidad medida —% gastado por carril-hora desde la primera lectura de
+//    la ventana, con al menos `minCarrilHoras` de datos—: los carriles que llegan al
+//    fin del horizonte sin pasar el tope. El horizonte es el reinicio de la ventana,
+//    o `horizonteHoras` si es más corto (para la semanal es una decisión de Leo: hasta
+//    el reinicio es lo conservador y con el gasto del 18/10 deja casi siempre 1 carril).
+// Lo que no sabe no lo inventa: sin lectura, con la ventana vencida o sin datos de
+// velocidad, no baja por eso. Una lectura vieja (la statusline dejó de escribir) no
+// se usa: se mantiene la última decisión, en vez de leer "sin límite" en un dato
+// congelado. Las horas salen de la lectura (`leida`, la hora del scout): el motor no
+// tiene reloj. `enCurso(n)`: los carriles que corren desde ahora hasta la próxima.
+function crearVigia({ umbral5h = 85, reservaSemanal = 10, minCarrilHoras = 0.5, maxVejezSeg = 600, horizonteHoras = null } = {}) {
+  const ventanas = { cinco_h: { tope: umbral5h, ancla: null }, semanal: { tope: 100 - reservaSemanal, ancla: null } }
+  let previa = null // { leida, carriles }
+  let carriles = 0
+  let ultima = null // la última decisión tomada con una lectura usable
+  return {
+    enCurso(n) {
+      carriles = n
+    },
+    // lectura: { cinco_h, cinco_h_reinicia, semanal, semanal_reinicia, medida, leida }
+    leer(l, max) {
+      if (!l || typeof l.cinco_h !== 'number' || typeof l.semanal !== 'number' || typeof l.leida !== 'number')
+        return { P: max, motivo: 'sin lectura de cuota' }
+      if (previa && l.leida > previa.leida) {
+        const horas = (l.leida - previa.leida) / 3600
+        for (const v of Object.values(ventanas)) if (v.ancla) v.ancla.carrilHoras += previa.carriles * horas
+      }
+      previa = { leida: Math.max(l.leida, previa?.leida ?? 0), carriles }
+      const vejez = typeof l.medida === 'number' ? l.leida - l.medida : 0
+      if (vejez > maxVejezSeg)
+        return { P: Math.min(ultima?.P ?? max, max), motivo: `lectura de cuota de hace ${Math.round(vejez / 60)} min (¿la statusline dejó de escribir?): se mantiene ${ultima ? `la última decisión, ${ultima.P}` : 'el techo'}` }
+      let P = max
+      const motivos = []
+      for (const [k, v] of Object.entries(ventanas)) {
+        const usado = l[k]
+        const reinicia = l[`${k}_reinicia`]
+        if (!(reinicia > l.leida)) {
+          v.ancla = null // ventana vencida: la lectura ya no dice nada de la actual
+          continue
+        }
+        if (!v.ancla || v.ancla.reinicia !== reinicia || usado < v.ancla.usado) v.ancla = { reinicia, usado, carrilHoras: 0 }
+        if (usado >= v.tope) {
+          P = 1
+          motivos.push(`${k} al ${usado}% (tope ${v.tope}%)`)
+          continue
+        }
+        const { carrilHoras } = v.ancla
+        if (carrilHoras >= minCarrilHoras && usado > v.ancla.usado) {
+          const porCarrilHora = (usado - v.ancla.usado) / carrilHoras
+          const horas = Math.min((reinicia - l.leida) / 3600, horizonteHoras ?? Infinity)
+          const caben = Math.max(1, Math.floor((v.tope - usado) / (porCarrilHora * horas)))
+          if (caben < P) {
+            P = caben
+            motivos.push(`${k} al ${usado}%, ${porCarrilHora.toFixed(1)}%/h por carril y ${Math.round(horas)} h de horizonte: ${caben} carril(es) para no pasar ${v.tope}%`)
+          }
+        }
+      }
+      ultima = { P: Math.min(P, max) }
+      return { P: ultima.P, motivo: motivos.join('; ') || `5 h al ${l.cinco_h}%, semanal al ${l.semanal}%: sin límite` }
+    },
+  }
+}
+
 // Carpeta de un worktree que crea el motor (§3.10c). El prefijo `wf_` es el
 // contrato con el repo: los worktrees de los agentes de Claude Code ya caen en
 // `wf_*`/`agent-*`, y un repo que aísla recursos compartidos por worktree (la base
@@ -265,7 +394,8 @@ A.denyPaths ??= []
 A.requiredChecks ??= []
 
 const M = A.models
-const T = A.tiers
+const T = { ...TIER_DEFAULT, ...(A.tiers ?? {}) }
+const MAX_P = A.maxParallel ?? 3
 
 // §3.1b — EFFORT por rol (config `role_efforts` → args.efforts; override por issue en
 // args.issueEfforts). El costo de una corrida escala con turnos × contexto acumulado,
@@ -273,19 +403,17 @@ const T = A.tiers
 // mueve el effort— pesó ~6% en la autopsia de julio (App.SaltaCompra, sin review en xhigh)
 // y 17–26% del costo ponderado en las corridas de octubre sobre Radar, con la revisión en
 // xhigh. Por eso: los roles EJECUTORES (scout/validator/serializer: corren comandos) van a
-// 'low' —no razonan, ejecutan—, y los roles de JUICIO (reviewer/judge/particionador/
-// resolver) van a 'xhigh' (2026-10-09): ahí el error es asimétrico (un falso negativo del
-// reviewer no lo recupera nadie después, el gate es puramente numérico), y subirles el
-// effort encarece el output, que es la parte chica de la cuenta.
+// 'low' —no razonan, ejecutan—, y los roles de JUICIO (reviewer/resolver) van a 'xhigh'
+// (2026-10-09): ahí el error es asimétrico (lo que el revisor no ve no lo ve nadie
+// después, el gate es puramente numérico), y subirles el effort encarece el output,
+// que es la parte chica de la cuenta.
 const EFFORT_DEFAULT = {
   scout: 'low',
   validator: 'low',
   serializer: 'low',
   implementer: 'medium',
   resolver: 'xhigh',
-  particionador: 'xhigh',
   reviewer: 'xhigh',
-  judge: 'xhigh',
   applier: 'medium',
 }
 const E = { ...EFFORT_DEFAULT, ...(A.efforts ?? {}) }
@@ -350,6 +478,8 @@ const DEPS = (donde) => `bash ${DEPS_CLI} ${donde}`
 // tokens de prompt (devbox, 1017b) contra 19K del implementer; medido en la Mac
 // como sesión `claude -p --agent`: operador 12K, sesión con todas las tools 33K.
 const OPERADOR = 'host-orchestrator:operador'
+// ¿La última medición trajo los tests del hook? Decide el tier del validator (§3.1).
+let testsDelHook = false
 
 // Package manager (autopsia cn-radar-al-dia-0921, 2026-09-21): el applier corrió
 // `npm install` en un repo pnpm y coló dos package-lock.json. Una sola redacción para
@@ -378,6 +508,7 @@ const SCOUT_SCHEMA = {
           },
           pr_number: { type: 'integer' },
           pr_branch: { type: 'string' },
+          revisado: { type: 'boolean', description: 'solo en DONE: el PR mergeado ya tiene la etiqueta pipeline-revisado' },
           blocked_by: { type: 'array', items: { type: 'integer' } },
           parent: { type: 'integer', description: 'issue del spec padre, por grafo nativo' },
           detalle: { type: 'string' },
@@ -385,6 +516,20 @@ const SCOUT_SCHEMA = {
       },
     },
     specs: { type: 'array', items: { type: 'integer' }, description: 'issues padre del scope: la intención contra la que se revisa' },
+    base_por_integrar: { type: 'integer', description: 'solo si el comando lo imprimió' },
+    paralelo: { type: 'integer', description: 'solo si el comando lo imprimió' },
+    cuota: {
+      type: 'object',
+      description: 'solo si el comando lo imprimió, tal cual',
+      properties: {
+        cinco_h: { type: 'number' },
+        cinco_h_reinicia: { type: 'number' },
+        semanal: { type: 'number' },
+        semanal_reinicia: { type: 'number' },
+        medida: { type: 'number' },
+        leida: { type: 'number' },
+      },
+    },
     notas: { type: 'string' },
   },
 }
@@ -450,6 +595,29 @@ const SETUP_SCHEMA = {
       description: 'el JSON de pipeline-read.sh push-auth, tal cual',
       properties: { via: { type: 'string' }, tipo: { type: 'string' }, scopes: { description: "string con los scopes, o null: tal cual lo imprimió" } },
     },
+    commit: { type: 'string', description: 'git rev-parse HEAD de la integradora, tal cual' },
+    arbol: { type: 'string', description: "git rev-parse 'HEAD^{tree}' de la integradora, tal cual" },
+  },
+}
+
+// Lo que reporta un serializer que deja la integradora en un estado nuevo (refresh,
+// integrar un PR): commit y árbol, para que el motor sepa si ese árbol ya está medido.
+const DE_LA_INTEGRADORA = {
+  commit_integracion: { type: 'string', description: 'git rev-parse HEAD de la integradora, tal cual' },
+  arbol_integracion: { type: 'string', description: "git rev-parse 'HEAD^{tree}' de la integradora, tal cual" },
+}
+const REFRESCO_SCHEMA = { ...SERIALIZER_SCHEMA, properties: { ...SERIALIZER_SCHEMA.properties, ...DE_LA_INTEGRADORA } }
+const INTEGRAR_SCHEMA = {
+  type: 'object',
+  required: ['status', 'mergeado', 'detalle'],
+  properties: {
+    status: { type: 'string', enum: ['ok', 'ya_estaba', 'conflicto', 'blocked'] },
+    mergeado: { type: 'boolean' },
+    arbol: { type: 'string', description: "git rev-parse 'HEAD^{tree}' del worktree del PR después del paso 4, tal cual" },
+    limpio: { type: 'boolean' },
+    pr_number: { type: 'integer' },
+    detalle: { type: 'string' },
+    ...DE_LA_INTEGRADORA,
   },
 }
 
@@ -463,81 +631,43 @@ const RESOLVER_SCHEMA = {
   },
 }
 
-const PARTICION_SCHEMA = {
+// Un revisor por PR mergeado (§3.7, 4.16.0): encuentra y decide en el mismo turno.
+const REVISION_SCHEMA = {
   type: 'object',
-  required: ['unidades', 'analisis'],
+  required: ['hallazgos', 'resumen'],
   properties: {
-    analisis: { type: 'string', description: 'mapa integral del diff: módulos, seams, contratos' },
-    unidades: {
+    resumen: { type: 'string', description: 'qué se revisó y cómo, en 2-3 líneas' },
+    hallazgos: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['nombre', 'paths'],
-        properties: {
-          nombre: { type: 'string' },
-          paths: { type: 'array', items: { type: 'string' } },
-          seams: { type: 'string' },
-        },
-      },
-    },
-  },
-}
-
-const FINDINGS_SCHEMA = {
-  type: 'object',
-  required: ['findings'],
-  properties: {
-    findings: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['titulo', 'ubicacion', 'severidad', 'por_que', 'fix_propuesto'],
+        required: ['titulo', 'ubicacion', 'severidad', 'por_que', 'decision', 'razon'],
         properties: {
           titulo: { type: 'string' },
           ubicacion: { type: 'string', description: 'file:line' },
           severidad: { type: 'string', enum: ['alta', 'media', 'baja'] },
           por_que: { type: 'string' },
-          fix_propuesto: { type: 'string' },
+          fix: { type: 'string', description: 'el arreglo concreto (obligatorio si decision = aplicar)' },
+          decision: { type: 'string', enum: ['aplicar', 'humano', 'seguimiento'] },
+          razon: { type: 'string', description: 'por qué esa decisión, en una línea' },
         },
       },
     },
-  },
-}
-
-const JUICIO_SCHEMA = {
-  type: 'object',
-  required: ['aplicar', 'rechazadas', 'humano'],
-  properties: {
-    aplicar: {
-      type: 'array',
-      description: 'en orden de aplicación (independientes primero)',
-      items: {
-        type: 'object',
-        required: ['titulo', 'ubicacion', 'fix', 'razon'],
-        properties: {
-          titulo: { type: 'string' },
-          ubicacion: { type: 'string' },
-          fix: { type: 'string' },
-          razon: { type: 'string' },
-        },
-      },
-    },
-    rechazadas: {
-      type: 'array',
-      items: { type: 'object', properties: { titulo: { type: 'string' }, ubicacion: { type: 'string' }, razon: { type: 'string' } } },
-    },
-    humano: { type: 'array', items: { type: 'object', properties: { titulo: { type: 'string' }, decision_necesaria: { type: 'string' } } } },
   },
 }
 
 const APPLIER_SCHEMA = {
   type: 'object',
-  required: ['worktree', 'branch', 'aplicadas', 'falladas', 'resumen'],
+  required: ['worktree', 'branch', 'aplicados', 'fallados', 'resumen'],
   properties: {
-    worktree: { type: 'string' },
+    worktree: { type: 'string', description: 'pwd absoluto' },
     branch: { type: 'string' },
-    aplicadas: { type: 'integer' },
-    falladas: { type: 'array', items: { type: 'string' } },
+    aplicados: { type: 'array', items: { type: 'string' }, description: 'títulos de los arreglos aplicados y commiteados' },
+    fallados: {
+      type: 'array',
+      items: { type: 'object', properties: { titulo: { type: 'string' }, motivo: { type: 'string' } } },
+      description: 'los que se revirtieron o no se pudieron aplicar, con el motivo',
+    },
     resumen: { type: 'string' },
   },
 }
@@ -586,6 +716,7 @@ async function llamar(makePrompt, opts, intentos = 2) {
 // otro verde. El motor además acepta `ya_medido` solo si el árbol reportado es ése.
 function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false, esperado = null } = {}) {
   const en = `cd ${donde} &&`
+  const tierUsado = tierEfectivo('validator', T, { testsDelHook })
   const conocido = esIdDeGit(esperado) && memoria.medicion(esperado) ? esperado : null
   // Con el árbol ya medido solo queda lo del diff; las dependencias hacen falta
   // únicamente si hay que correr los tests del diff (sin hook).
@@ -622,9 +753,15 @@ ${suite}
 4. ${en} git ls-files -- ${GLOBS_LOCKFILE}   → lockfiles = una línea por entrada, tal cual (sin salida → lista vacía).
 ${diff}
 Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
-    { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, agentType: OPERADOR, schema: MEDICION_SCHEMA }
+    { label: `validator:${etiqueta}`, phase: faseTag, model: M[tierUsado], effort: E.validator, agentType: OPERADOR, schema: MEDICION_SCHEMA }
   ).then((crudo) => {
     let r = crudo
+    // La guarda del tier, sin llegar una medición tarde: si en T3 el hook no trajo los
+    // tests, este medidor leyó la salida cruda del runner y su número no se usa.
+    if (tierUsado === 'T3' && r?.status === 'ok' && !r.ya_medido && r.tests_fuente !== 'hook') {
+      testsDelHook = false
+      r = { ...r, status: 'error', error: 'medición en T3 sin los tests del hook (leyó la salida cruda del runner): se repite en T2' }
+    }
     if (r?.ya_medido) {
       r =
         r.arbol === conocido
@@ -647,6 +784,9 @@ Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
       const delDiff = r.tests_del_diff ?? []
       r.tests_del_diff_verdes = delDiff.length > 0 && !delDiff.some((f) => (r.failing_test_files ?? []).includes(f))
     }
+    // La guarda del tier (§3.1): Haiku mide solo cuando la última medición mostró
+    // que el hook trae los tests; una que vuelve a 'suite' lo devuelve a T2.
+    if (r?.status === 'ok' && !r.ya_medido) testsDelHook = Boolean(A.validateHook) && r.tests_fuente === 'hook'
     if (r && memoria.guardar(r)) log(`medición ${etiqueta}: árbol ${r.arbol.slice(0, 12)} guardado (${memoria.arboles().length} en memoria)`)
     else if (crudo?.ya_medido && r?.status === 'ok') log(`medición ${etiqueta}: árbol ${r.arbol.slice(0, 12)} ya medido — sin re-medir`)
     return r
@@ -671,15 +811,22 @@ const SERIALIZER_BASE = `Sos el SERIALIZADOR de mutaciones remotas (git-officer)
 PROHIBIDO: usar el tool Monitor, o terminar tu turno "esperando" algo — tu turno termina ÚNICAMENTE con el reporte estructurado emitido. Si esperás checks de CI: SOLO los requeridos por nombre (${JSON.stringify(A.requiredChecks)}; lista vacía = no esperes ninguno), con un loop foreground de Bash (timeout 600000); checks advisory se IGNORAN.
 AUDIT LOG: por cada mutación que EJECUTES (no las constatadas) apendeá una línea a ${AUDIT_LOG}: "$(date -Iseconds) ${A.runLabel} <contexto> <accion> <resultado>" (mkdir -p si hace falta).\n\n`
 
+// §3.17 — el CANDADO: con varios carriles, dos serializers podrían pedir mutar a la
+// vez (publicar una issue mientras el carril de merge integra un PR). Todos pasan por
+// acá, de a uno, en orden de llegada. No hay otra forma de llamar a un serializer.
+const candado = crearCandado()
 function serializar(tarea, etiqueta, faseTag, schema = SERIALIZER_SCHEMA) {
-  return llamar((suf) => SERIALIZER_BASE + tarea + `\n\nDevolvé por schema: status ('ok' | 'ya_estaba' | 'blocked'), pr_number si aplica, detalle (1-2 líneas).${suf}`, {
-    label: `serializer:${etiqueta}`,
-    phase: faseTag,
-    model: M[T.serializer],
-    effort: E.serializer,
-    agentType: OPERADOR,
-    schema,
-  })
+  const estados = schema.properties.status.enum.map((x) => `'${x}'`).join(' | ')
+  return candado.con(() =>
+    llamar((suf) => SERIALIZER_BASE + tarea + `\n\nDevolvé por schema: status (${estados}), pr_number si aplica, detalle (1-2 líneas).${suf}`, {
+      label: `serializer:${etiqueta}`,
+      phase: faseTag,
+      model: M[tierEfectivo('serializer', T)],
+      effort: E.serializer,
+      agentType: OPERADOR,
+      schema,
+    })
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -691,10 +838,10 @@ function scoutear(etiqueta, faseTag) {
   return llamar(
     (suf) => `Sos un TRANSPORTE (${etiqueta}, corrida ${A.runLabel}), no un analista. Corré EXACTAMENTE este comando y devolvé su salida por el output estructurado, tal cual:
 
-cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}
+cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --base ${BASE} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}${A.cuota ? ` --cuota ${A.cuota}` : ''}
 
-El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
-    { label: `scout:${etiqueta}`, phase: faseTag, model: M[T.scout], effort: E.scout, agentType: OPERADOR, schema: SCOUT_SCHEMA }
+El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, y si aparecen base_por_integrar, paralelo y cuota, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
+    { label: `scout:${etiqueta}`, phase: faseTag, model: M[tierEfectivo('scout', T)], effort: E.scout, agentType: OPERADOR, schema: SCOUT_SCHEMA }
   )
 }
 
@@ -726,9 +873,10 @@ log(
     `budget ${BUDGET_TOTAL ? Math.round(BUDGET_TOTAL / 1000) + 'k de output' : 'SIN TOPE'}` +
     `${A.budgetTotal ? ' (por args)' : budget.total ? ' (por directiva)' : ''} — ts=${A.ts}`
 )
-log(`tiers: ${Object.entries(T).map(([r, t]) => `${r}=${t}→${M[t]}`).join(' ')}`)
-log(`efforts: ${Object.entries(E).map(([r, e]) => `${r}=${e}`).join(' ')}`)
+log(`tiers: ${Object.keys(TIER_DEFAULT).map((r) => `${r}=${T[r]}→${M[T[r]]}`).join(' ')} (validator en T3 solo con los tests del hook)`)
+log(`efforts: ${Object.entries(E).map(([r, e]) => `${r}=${e}`).join(' ')} — hasta ${MAX_P} carril(es)${A.cuota ? `, vigía de cuota sobre ${A.cuota}` : ''}`)
 
+const ETIQUETAS_DEL_MOTOR = ['agent-blocked', 'merge-blocked', 'review-fix', 'pipeline-revisado']
 const setup = await serializar(
   `Preparar la rama integradora del pipeline:
 1. cd ${REPO} && git fetch origin
@@ -738,7 +886,8 @@ const setup = await serializar(
    b. Si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}).
 4. ${DEPS(WT_INTEGRACION)}   → deja las dependencias iguales al lockfile (reinstala solo si cambió). Sale ≠ 0 → status 'blocked' con su salida.
 5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.
-6. Etiquetas con las que el motor marca lo que queda para Leo: cd ${REPO} && gh label list --limit 300 --json name --jq '.[].name' → para cada una de agent-blocked, merge-blocked, review-fix que NO aparezca: gh label create <nombre> (contexto audit: setup-labels). Sin ellas, marcar falla y un relanzamiento reimplementa.`,
+6. cd ${REPO} && gh label list --limit 300 --json name --jq '.[].name'   → para cada una de ${ETIQUETAS_DEL_MOTOR.join(', ')} que NO aparezca: gh label create <nombre> (contexto audit: setup-labels).
+7. cd ${WT_INTEGRACION} && git rev-parse HEAD 'HEAD^{tree}'   → commit = la primera línea, arbol = la segunda, TAL CUAL.`,
   'setup-rama',
   'Setup',
   SETUP_SCHEMA
@@ -752,359 +901,143 @@ if (!setup || setup.status === 'blocked') {
 const vetoPush = vetoDeWorkflows(setup.token)
 const VEDADOS = vetoPush.vedar ? [...new Set([...A.denyPaths, VETO_WORKFLOWS])] : A.denyPaths
 log(`push: ${vetoPush.motivo}${vetoPush.vedar ? ` → ${VETO_WORKFLOWS} vedado` : ''}`)
+const DENY = VEDADOS.length
+  ? `\nPATHS VEDADOS (ratchets/guards del repo y lo que el token de push no puede publicar — NO los toques ni "mejores" nada ahí; el gate rechaza un diff que los toque): ${VEDADOS.join(', ')}`
+  : ''
 const registro = crearRegistro()
 const memoria = crearMemoria()
-// Lo que el motor sabe de cada árbol, para declarar el `esperado` de cada medición:
-// el de la integradora (último baseline, o el del último PR mergeado) y el que midió
-// el gate de cada issue (que es el de su PR mientras la integradora no se mueva).
-let arbolIntegradora = null
-const arbolDeIssue = new Map()
 
 // ===========================================================================
-// LOOP DE WAVES
+// DESPACHO CONTINUO (§3.17)
+//
+// Tres carriles alimentados por un despachador:
+//  - implementación: hasta P issues a la vez, cada una en su worktree, desde el
+//    commit de la integradora que estaba vigente al despacharla;
+//  - merge: serial, un PR por vez; integrar = actualizar la rama y, si el árbol que
+//    queda ya está medido en verde, mergear en el mismo agente;
+//  - revisión: serial, un revisor + un aplicador por PR mergeado; los arreglos salen
+//    como PR nuevo a la cola de merge.
+// Cada vez que algo termina, el despachador vuelve a leer GitHub (scout) y llena los
+// carriles libres. No hay barrera: una implementación de 70 min no frena a nadie.
+// El estado sale de GitHub en cada vuelta y toda mutación es check-then-act, así que
+// matar y relanzar no rehace lo publicado.
 // ===========================================================================
-const wavesReporte = []
+const trabajos = [] // un registro por implementación
+const mergesReporte = []
+const revisiones = [] // un registro por PR revisado: qué encontró el revisor, qué aplicó el aplicador
 const bugsReales = []
 const bloqueadas = []
 const pendientes = []
-const cerradas = [] // issues con PR publicado a la integradora → van al `Closes #` del PR final (autocierre al mergear a la default branch)
-const specsDelScope = new Set() // issues padre (spec) que el scope atraviesa: la intención contra la que revisa el eje Spec
-let inReviewUltimo = [] // PRs rojos/no-mergeables: NO accionables por el motor, van a para_leo
+const cerradas = [] // issues con PR mergeado a la integradora → `Closes #` del PR final
+const seguimientos = []
+const humanos = []
+const avisos = [] // cosas que el motor vio salir mal y no puede deshacer
+const specsDelScope = new Set()
+let inReviewUltimo = []
 let allDone = false
-let baseMetrics = null
-let wavesAgotadas = false // el loop terminó por el tope, no por quedarse sin trabajo
-let cortePorWaves = false // …y el scope seguía incompleto: distinto de un corte por budget
+let fatal = null
+let sinBudget = false
+let P = MAX_P
 
-// Lo que cada scout deja registrado: los specs que el scope atraviesa y las issues
-// ya DONE. Las DONE alimentan el `Closes #` del PR final — derivarlas del scout y no
-// sólo de los publish de esta corrida cubre el caso en que el trabajo ya estaba hecho
-// (un resume, o un scope que llega completo): sin esto el PR final salía sin autocierre.
+const timbre = crearTimbre()
+const vigia = crearVigia(A.cuotaUmbrales ?? {})
+const enVuelo = new Set() // issues implementándose
+const colaMerge = []
+const enMerge = new Set() // claves pr<M> en la cola o integrándose
+const colaRevision = []
+const revisadosEnCorrida = new Set()
+// PR de arreglos → PR revisado, y la revisión en espera de que esos arreglos entren
+// (o queden para Leo) para registrarse y llevar la etiqueta pipeline-revisado.
+const arregloDe = new Map()
+const revisionPorArreglo = new Map()
+let carrilMerge = null
+let carrilRevision = null
+// Reloj lógico: cada trabajo que termina avanza `eventos`. Una foto del scout pedida
+// antes de que algo termine puede mostrarlo en su estado viejo; `terminoEn` deja
+// reconocer esas entradas y no actuar sobre ellas.
+let eventos = 0
+const terminoEn = {}
+let refrescos = 0
+let baseMovida = true
+let base = null // { commit, arbol, metricas } — la integradora vigente, medida
+// Mientras el carril de merge puede estar moviendo la integradora (un integrar que
+// mergea, un refresh) y todavía no fijó la base nueva, no se despacha nada: un scout
+// de ese momento puede ver un bloqueante DONE con `base` todavía sin su código, y la
+// dependiente saldría de una base que no lo tiene (revisión de 4.16.0).
+let integradoraEnMovimiento = 0
+async function moviendoIntegradora(fn) {
+  integradoraEnMovimiento++
+  try {
+    return await fn()
+  } finally {
+    integradoraEnMovimiento--
+  }
+}
+// El árbol que el motor midió (y aprobó) para cada PR: el del gate de su issue, el de
+// los arreglos de una revisión, o el que midió al integrarlo. Es el `esperado` de la
+// próxima integración: si el árbol actualizado da ése, se mergea sin volver a medir.
+const arbolPorPr = new Map()
+
+const presupuestoOk = () => !BUDGET_TOTAL || restante() >= A.minBudgetWave
+const algoEnVuelo = () => enVuelo.size > 0 || carrilMerge !== null || carrilRevision !== null || colaMerge.length > 0 || colaRevision.length > 0
+
 const registrarScout = (s) => {
   for (const x of s?.specs ?? []) specsDelScope.add(x)
   for (const i of s?.issues ?? []) if (i.bucket === 'DONE') cerradas.push(i.number)
 }
 
-for (let wave = 1; wave <= A.maxWaves; wave++) {
-  if (BUDGET_TOTAL && restante() < A.minBudgetWave) {
-    log(`■ CORTE por budget en boundary de wave ${wave}: quedan ${Math.round(restante() / 1000)}k < ${Math.round(A.minBudgetWave / 1000)}k mínimos`)
-    pendientes.push(`waves restantes desde la ${wave}`)
-    break
+function terminar(clave) {
+  terminoEn[clave] = ++eventos
+  timbre.avisar()
+}
+
+// Un trabajo suelto: corre sin bloquear al despachador y, pase lo que pase, avisa al
+// terminar. Ningún error de un carril tira la corrida entera.
+function suelto(clave, fn) {
+  return fn()
+    .catch((e) => log(`⚠ ${clave}: ${String(e).slice(0, 200)}`))
+    .finally(() => terminar(clave))
+}
+
+// La integradora vigente. `confirmado`: el mismo agente reportó, de la salida del shell,
+// que el árbol mergeado es el aprobado y que la integradora quedó en ése (con squash
+// son el mismo). Ahí la base sale de la memoria sin despachar a nadie. Si no, se mide,
+// declarando como esperado lo que el serializer dijo: el shell del medidor lo verifica.
+// `vigilar`: el cambio no pasó por la aprobación del motor (un merge no confirmado). Si
+// la integradora quedó peor que antes, la corrida se frena: adoptar esa medición como
+// base haría que ningún gate posterior vea la regresión.
+async function fijarBase(commit, arbol, etiqueta, { confirmado = false, vigilar = false } = {}) {
+  const conocida = confirmado && esIdDeGit(arbol) ? memoria.medicion(arbol) : null
+  if (conocida && esIdDeGit(commit)) {
+    base = { commit, arbol, metricas: aBaseline(conocida) }
+    log(`base ${etiqueta}: árbol ${arbol.slice(0, 12)} ya medido — sin re-medir`)
+    return true
   }
-  const FASE = `Wave ${wave}`
-  phase(FASE)
-
-  // --- Scout: TRANSPORTE, no juicio (§3.4b) ---------------------------------
-  // El bucketing lo computa pipeline-read.sh sobre el grafo nativo de GitHub;
-  // acá solo hace falta un turno con shell, porque el script del Workflow no
-  // tiene ninguna. La wave 1 ni eso: reusa el pre-fetch que T0 ya hizo en las
-  // precondiciones. La frescura por wave se mantiene — el estado cambia entre
-  // waves y por eso las siguientes vuelven a correr el comando.
-  let scout
-  if (wave === 1 && A.scopeInicial) {
-    scout = A.scopeInicial
-    log(`scout w1: pre-fetch de T0 (sin agente)`)
-  } else {
-    scout = await scoutear(`w${wave}`, FASE)
+  const med = await medirFirme(WT_INTEGRACION, 'Merge', `base-${etiqueta}`, { pull: true, esperado: arbol })
+  if (med?.status !== 'ok') {
+    log(`⚠ base ${etiqueta} inválida (${med?.error ?? 'validator murió'})${base ? ' — los gates siguen contra la anterior' : ''}`)
+    return false
   }
-  if (!scout) {
-    log(`✖ scout de la wave ${wave} murió — ABORT`)
-    return { status: 'ABORT', fase: FASE, detalle: 'scout murió', waves: wavesReporte }
-  }
-  registrarScout(scout)
-  const buckets = {}
-  for (const i of scout.issues) (buckets[i.bucket] ??= []).push(i)
-  log(
-    `scout w${wave}: ${scout.issues.length} issues — ` +
-      Object.entries(buckets).map(([b, l]) => `${b}:${l.length}`).join(' ')
-  )
-  for (const i of buckets.HUMAN_GATED ?? []) bloqueadas.push(`#${i.number} HUMAN_GATED: ${i.detalle ?? i.title}`)
-  inReviewUltimo = (buckets.IN_REVIEW ?? []).map((i) => `#${i.number} IN_REVIEW (PR #${i.pr_number ?? '?'}): ${i.detalle ?? i.title} — requiere intervención humana antes de re-correr`)
-
-  if (scout.all_done) {
-    allDone = true
-    log(`✔ scope completo en wave ${wave} — pasando a Review`)
-    break
-  }
-
-  const accionables = (buckets.MERGE_READY ?? []).length + (buckets.IMPLEMENTABLE ?? []).length
-  if (accionables === 0) {
-    log(`■ BLOCKED: sin issues accionables (${(buckets.BLOCKED_BY_DEP ?? []).length} por deps, ${(buckets.HUMAN_GATED ?? []).length} humanas, ${(buckets.IN_REVIEW ?? []).length} in-review) — Leo tiene que intervenir`)
-    break
-  }
-
-  // --- Refresh: base → rama integradora (§3.6, merge, nunca rebase) ---------
-  const refresh = await serializar(
-    `Refresh de la rama integradora (wave ${wave}):
-1. cd ${WT_INTEGRACION} && git fetch origin && git pull --ff-only origin ${RAMA}
-2. git merge origin/${BASE}
-   - Sin conflicto (o ya al día): push si hubo merge nuevo (contexto audit: refresh-w${wave}) y status 'ok' (o 'ya_estaba').
-   - CON CONFLICTO: NO resuelvas. git merge --abort y status 'blocked' con la lista de archivos en conflicto en detalle.`,
-    `refresh-w${wave}`,
-    FASE
-  )
-  if (refresh?.status !== 'ya_estaba') arbolIntegradora = null // trajo algo de la base (o no se sabe): árbol nuevo
-  if (refresh?.status === 'blocked') {
-    log(`refresh w${wave} conflictúa (${refresh.detalle}) → merge-resolver`)
-    const veredicto = await resolver(
-      `## Workspace
-Worktree: ${WT_INTEGRACION} (rama ${RAMA}, worktree local de integración). Tarea: mergear origin/${BASE} en ${RAMA}.
-Corré vos: cd ${WT_INTEGRACION} && git merge origin/${BASE} — y resolvé los conflictos EN LOS ARCHIVOS.
-
-## Intent packet
-Rama integradora del pipeline ${A.runLabel} (scope ${SCOPE_DESC}): acumula los PRs de las issues del scope. ${BASE} trae trabajo externo al pipeline. Criterio: preservar AMBAS intenciones; ante incompatibilidad semántica real, ABORT + INCOMPATIBLE.
-
-## Conflicto reportado
-${refresh.detalle}`,
-      `refresh-w${wave}`,
-      FASE
-    )
-    if (veredicto?.action === 'MERGE' && veredicto.resolution !== 'INCOMPATIBLE') {
-      const pushRefresh = await serializar(
-        `El merge-resolver dejó resuelto y commiteado el merge de origin/${BASE} en ${WT_INTEGRACION}. Verificá que el merge esté cerrado (sin conflict markers, working tree limpio) y pusheá ${RAMA} (contexto audit: refresh-resolved-w${wave}). Si el árbol NO está limpio: status 'blocked'.`,
-        `refresh-push-w${wave}`,
-        FASE
-      )
-      if (pushRefresh?.status === 'blocked') {
-        log(`■ BLOCKED en refresh w${wave}: ${pushRefresh.detalle}`)
-        return { status: 'BLOCKED', fase: FASE, detalle: `refresh: ${pushRefresh.detalle}`, waves: wavesReporte, bloqueadas }
-      }
-    } else {
-      log(`■ BLOCKED: refresh ${BASE}→${RAMA} INCOMPATIBLE (${veredicto?.resumen ?? 'resolver murió'}) — Leo tiene que mirar`)
-      return { status: 'BLOCKED', fase: FASE, detalle: `refresh incompatible: ${veredicto?.resumen}`, waves: wavesReporte, bloqueadas }
-    }
-  }
-
-  // --- Baseline de la wave (§3.3): sobre la rama integradora refrescada -----
-  const baseMed = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}`, { pull: true, esperado: arbolIntegradora })
-  if (!baseMed || baseMed.status !== 'ok') {
-    log(`✖ baseline w${wave} inválido (${baseMed?.error ?? 'validator murió'}) — ABORT (medición inválida nunca es éxito)`)
-    return { status: 'ABORT', fase: FASE, detalle: `baseline: ${baseMed?.error ?? 'validator murió'}`, waves: wavesReporte, bloqueadas }
-  }
-  baseMetrics = aBaseline(baseMed)
-  arbolIntegradora = baseMed.arbol
-  log(
-    `baseline w${wave}: ${Object.entries(baseMed.metrics).map(([k, v]) => `${k}=${v}`).join(' ')} testsRojos=${baseMed.tests_failed}` +
-      ` (tests por ${baseMed.tests_fuente ?? '?'})${baseMed.lockfiles_ajenos.length ? ` lockfilesAjenos=${baseMed.lockfiles_ajenos.join(',')}` : ''}`
-  )
-
-  const waveResumen = { wave, merges: [], impl: [] }
-
-  // --- Merge wave: SERIAL por PR MERGE_READY (validar → resolver → merge) ---
-  // §3.16: cada PR se intenta una vez por corrida. Si vuelve MERGE_READY sin un
-  // hecho nuevo (un merge que falló sin etiqueta, un serializer que murió), se
-  // marca merge-blocked para Leo en vez de repetir el mismo intento cada wave.
-  for (const iss of buckets.MERGE_READY ?? []) {
-    const prNum = iss.pr_number
-    const wtPr = wtDePr(prNum)
-    const clavePr = `pr${prNum}`
-    if (registro.decidir(clavePr) === 'para_leo') {
-      await marcarPr(prNum, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clavePr).ultimo})`, FASE, { conservar: wtPr })
-      waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: 'repetición sin hecho nuevo' })
-      continue
-    }
-    registro.intento(clavePr, { ultimo: 'merge empezado y no terminado' })
-    const prep = await serializar(
-      `Preparar el PR #${prNum} (issue #${iss.number}) para merge a ${RAMA}:
-1. cd ${REPO} && git fetch origin
-2. CHECK: gh pr view ${prNum} --json state,mergedAt → si ya está mergeado: 'ya_estaba' y TERMINÁ.
-3. Worktree efímero en ${wtPr} — CONTRATO: el worktree DEBE quedar EXACTAMENTE en ese path (el validator mide ahí; otro path = medición inválida = merge bloqueado).
-   a. Si ya existe: reusalo con git pull.
-   b. Si la branch ${iss.pr_branch} está checkouteada en OTRO worktree (git worktree list — típico leftover de un implementer): si ese worktree está limpio (git status --porcelain vacío) y su HEAD está contenido en origin/${iss.pr_branch}, removelo (git worktree remove --force + git worktree prune) y seguí; si tiene commits sin pushear o cambios sin commitear, NO lo toques → status 'blocked' con el detalle.
-   c. git worktree add ${wtPr} ${iss.pr_branch}
-4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Las dependencias las pone al día el medidor.
-En detalle reportá el path del worktree.`,
-      `prep-pr${prNum}`,
-      FASE
-    )
-    if (prep?.status === 'ya_estaba') {
-      waveResumen.merges.push({ pr: prNum, resultado: 'ya_estaba' })
-      continue
-    }
-
-    if (prep?.status === 'blocked') {
-      const v = await resolver(
-        `## Workspace
-Worktree: ${wtPr} (branch ${iss.pr_branch}). Tarea: mergear origin/${RAMA} en la branch del PR #${prNum} — corré el merge y resolvé conflictos EN LOS ARCHIVOS, commiteados localmente.
-
-## Intent packet
-Issue #${iss.number}: ${iss.title}. El contrato ES el body del ticket: gh issue view ${iss.number} — y el PR: gh pr view ${prNum}.
-Si el diff parece exceder lo que el ticket pide, subí un peldaño de la escalera de intención antes de decidir:
-  sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
-te devuelve el '## Out of Scope' y el '## Testing Decisions' del spec padre — la evidencia que tus criterios 1 y 4 necesitan.
-Aplicá tus 5 criterios de no-regresión.
-
-## Conflicto reportado
-${prep?.detalle ?? 'sin detalle'}`,
-        `pr${prNum}`,
-        FASE
-      )
-      if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
-        await marcarPr(prNum, `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`, FASE)
-        waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: v?.resumen })
-        continue
-      }
-      // El resolver commitea LOCAL y no pushea (por contrato). El camino del refresh
-      // ya tenía su push explícito; éste no, y la branch llegaba al merge con commits
-      // sin publicar — lo rescataba el paso 1 del merge, dos veces en prd-0030-0818.
-      // Publicar acá deja el PR mostrando lo que realmente se va a mergear.
-      const pushPr = await serializar(
-        `El merge-resolver dejó resuelto y commiteado el merge de origin/${RAMA} en ${wtPr} (branch ${iss.pr_branch}, PR #${prNum}). Verificá que el merge esté cerrado (sin conflict markers, working tree limpio) y pusheá ${iss.pr_branch} (contexto audit: pr-${prNum}-resolved-push). Si el árbol NO está limpio o el push falla: status 'blocked' con el detalle.`,
-        `pr${prNum}-push`,
-        FASE
-      )
-      if (pushPr?.status === 'blocked') {
-        await marcarPr(prNum, `resolución sin publicar: ${pushPr.detalle ?? 'push fallido'}`, FASE, { conservar: wtPr })
-        waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: pushPr.detalle })
-        continue
-      }
-    }
-
-    const medPr = await medirFirme(wtPr, FASE, `pr${prNum}`, { esperado: arbolDeIssue.get(iss.number) })
-    const g = gate(medPr, baseMetrics, { exigirTests: false }) // el PR ya pasó su gate al publicarse; acá exigimos no-regresión post-merge-de-rama
+  if (vigilar && base) {
+    const g = gate(med, base.metricas, { exigirTests: false })
     if (!g.pass) {
-      if (medPr?.arbol) memoria.olvidar(medPr.arbol)
-      await marcarPr(prNum, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, FASE, { conservar: wtPr })
-      waveResumen.merges.push({ pr: prNum, resultado: 'gate-fail', motivo: g.motivos })
-      continue
-    }
-    const mrg = await serializar(
-      `Mergear el PR #${prNum} a ${RAMA}:
-1. Si la branch del PR avanzó localmente en ${wtPr} (merge de refresh o resolución), asegurate de que esté pusheada — lo que no está en el remoto no entra al merge.
-2. SOLTÁ LA BRANCH ANTES DE MERGEAR: git worktree remove --force ${wtPr} && git worktree prune. \`--delete-branch\` borra también la copia local y FALLA si la branch sigue checkouteada en un worktree; limpiar después del merge era el orden equivocado (2 PRs de la corrida prd-0030-0818 se resolvieron a mano por esto). El trabajo ya está pusheado en el paso 1: el worktree no guarda nada.
-3. CHECK: ¿ya está mergeado? → si no: gh pr merge ${prNum} --squash --delete-branch (contexto audit: pr-${prNum}-merge)
-4. En ${WT_INTEGRACION}: git pull --ff-only.`,
-      `merge-pr${prNum}`,
-      FASE
-    )
-    log(`merge PR #${prNum}: ${mrg?.status ?? 'serializer murió'}`)
-    if (mrg?.status === 'blocked') await marcarPr(prNum, `el merge no se completó: ${mrg.detalle}`, FASE)
-    else if (mrg) {
-      registro.anotar(clavePr, { ultimo: `merge ${mrg.status}` })
-      // squash de una branch que ya contiene la integradora: queda su mismo árbol
-      arbolIntegradora = medPr.arbol ?? null
-    }
-    waveResumen.merges.push({ pr: prNum, resultado: mrg?.status ?? 'serializer murió', motivo: mrg?.detalle })
-  }
-
-  // --- Post-merge: lo habilitado se recalcula después de mergear ------------
-  // El scout de arriba es una foto de ANTES de los merges: lo que un merge de esta
-  // wave destrabó salía recién en la siguiente, y cada eslabón de una cadena costaba
-  // dos waves. Si entró algo, otro scout (transporte, barato) y el baseline de lo
-  // que quedó en la integradora —el árbol del último PR mergeado, ya medido en su
-  // gate pre-merge: la memoria lo devuelve sin re-medir—.
-  let fotoImpl = buckets
-  if (waveResumen.merges.some((m) => m.resultado === 'ok' || m.resultado === 'ya_estaba')) {
-    const post = await scoutear(`w${wave}-post`, FASE)
-    if (post) {
-      registrarScout(post)
-      fotoImpl = {}
-      for (const i of post.issues) (fotoImpl[i.bucket] ??= []).push(i)
-      inReviewUltimo = (fotoImpl.IN_REVIEW ?? []).map((i) => `#${i.number} IN_REVIEW (PR #${i.pr_number ?? '?'}): ${i.detalle ?? i.title} — requiere intervención humana antes de re-correr`)
-      if (post.all_done) {
-        wavesReporte.push(waveResumen)
-        allDone = true
-        log(`✔ scope completo tras los merges de la wave ${wave} — pasando a Review`)
-        break
-      }
-      if ((fotoImpl.IMPLEMENTABLE ?? []).length) {
-        const basePost = await medirFirme(WT_INTEGRACION, FASE, `baseline-w${wave}-post`, { pull: true, esperado: arbolIntegradora })
-        if (basePost?.status === 'ok') {
-          baseMetrics = aBaseline(basePost)
-          arbolIntegradora = basePost.arbol
-        }
-        else log(`⚠ baseline post-merge w${wave} inválido (${basePost?.error ?? 'validator murió'}) — los gates de esta wave comparan contra el de antes de los merges`)
-      }
-    } else log(`⚠ scout post-merge w${wave} murió — se implementa con la foto de antes de los merges`)
-  }
-
-  // --- Impl wave: fan-out implementers en worktrees (cap maxParallel) -------
-  // §3.16: lo que el scout ofrece y ya se intentó en esta corrida sin un hecho
-  // nuevo no se despacha: se marca para Leo, con su worktree conservado. El
-  // reparto se decide ANTES de marcar: marcar deja la entrada como "bloqueada
-  // por el motor", que es justo lo que habilita un re-despacho si Leo la destraba.
-  const ofrecidas = fotoImpl.IMPLEMENTABLE ?? []
-  const vuelven = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'para_leo')
-  const implementables = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'despachar').slice(0, A.maxParallel)
-  for (const iss of vuelven) {
-    const d = registro.dato(`i${iss.number}`)
-    await marcarIssue(iss.number, `volvió a IMPLEMENTABLE en la misma corrida sin un hecho nuevo (último resultado: ${d.ultimo})`, FASE, d.worktree)
-  }
-  if (implementables.length > 0) {
-    log(`▶ impl w${wave}: ${implementables.map((i) => `#${i.number}`).join(' ')}`)
-    for (const iss of implementables) registro.intento(`i${iss.number}`, { ultimo: 'el implementer no devolvió resultado' })
-    const deny = VEDADOS.length ? `\nPATHS VEDADOS (ratchets/guards del repo y lo que el token de push no puede publicar — NO los toques ni "mejores" nada ahí; el gate rechaza un diff que los toque): ${VEDADOS.join(', ')}` : ''
-
-    // Destrabada una publicación bloqueada, se republica su worktree: el trabajo ya
-    // estaba hecho y medido (el gate pre-merge vuelve a mirar la no-regresión).
-    const implResultados = (
-      await parallel(
-        implementables.map((iss) => () => {
-          const p = registro.dato(`i${iss.number}`)?.publicable
-          if (!p) return implementarConGate(iss, FASE, deny)
-          log(`#${iss.number} destrabada: se republica el worktree conservado ${p.impl.worktree}, sin reimplementar`)
-          return Promise.resolve({ issue: iss.number, titulo: p.titulo, gate: 'PASS', motivos: [], impl: p.impl })
-        })
-      )
-    ).filter(Boolean)
-
-    // Publish SERIAL: una mutación remota por vez, orden determinístico
-    for (const r of implResultados) {
-      waveResumen.impl.push({ issue: r.issue, gate: r.gate, motivos: r.motivos })
-      bugsReales.push(...(r.impl?.bugs_reales ?? []).map((b) => `[#${r.issue}] ${b}`))
-      if (r.impl?.worktree) registro.anotar(`i${r.issue}`, { worktree: r.impl.worktree })
-      if (r.gate !== 'PASS') {
-        if (r.gate === 'FAIL') await marcarIssue(r.issue, `gate FAIL tras el reintento: ${(r.motivos ?? []).join('; ')}`, FASE, r.impl?.worktree)
-        else if (r.gate === 'MEDICION') await marcarIssue(r.issue, `el medidor no pudo medir (problema del medidor, no del código): ${(r.motivos ?? []).join('; ')}`, FASE, r.impl?.worktree)
-        else registro.anotar(`i${r.issue}`, { ultimo: (r.motivos ?? []).join('; ') })
-        continue
-      }
-      const publicar = (intento, extra = '') =>
-        serializar(
-          `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
-1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 3.
-2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, ${
-            (r.impl.recursos_verificados ?? []).length
-              ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
-              : ''
-          }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
-3. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree canónico del merge posterior. Solo conservalo si el push o el PR fallaron.
-Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle.${extra}`,
-          intento === 1 ? `publish-i${r.issue}` : `publish-i${r.issue}~p${intento}`,
-          FASE
-        )
-      let pub = await publicar(1)
-      // §3.16 — a lo sumo UN reintento, y de la publicación sola: el trabajo ya
-      // está hecho y medido. Lo que rechaza el remoto dos veces no lo arregla
-      // reimplementar (en 1017b el mismo rechazo costó seis implementaciones).
-      if (pub?.status === 'blocked') {
-        log(`publish #${r.issue}: blocked (${pub.detalle}) → reintento de solo la publicación`)
-        pub = await publicar(2, `\n\nINTENTO 2 de la publicación: el anterior terminó 'blocked' (${pub.detalle}). El trabajo ya está commiteado en el worktree: no se reimplementa nada. Verificá qué quedó hecho (push, PR) antes de cada paso y completá solo lo que falta.`)
-      }
-      log(`publish #${r.issue}: ${pub?.status ?? 'serializer murió'} ${pub?.pr_number ? `→ PR #${pub.pr_number}` : ''}`)
-      if (pub?.status === 'blocked') {
-        // Si Leo destraba la issue (arregla el token, por ejemplo), lo que corresponde
-        // es volver a publicar este worktree, no reimplementar: queda anotado.
-        registro.anotar(`i${r.issue}`, { publicable: { issue: r.issue, titulo: r.titulo, impl: r.impl } })
-        await marcarIssue(r.issue, `publicación bloqueada dos veces: ${pub.detalle}`, FASE, r.impl.worktree)
-        continue
-      }
-      // Publicado, el worktree se limpia: un comentario posterior ya no puede nombrarlo.
-      registro.anotar(`i${r.issue}`, { ultimo: pub ? `publicado (${pub.status})` : 'la publicación no devolvió resultado', ...(pub ? { worktree: null, publicable: null } : {}) })
-      // El PR por-issue va contra la rama integradora (no la default) → su "Closes #" es inerte.
-      // Anotamos la issue para inyectar el autocierre real en el PR final (integradora → default).
-      if (pub && (pub.pr_number || pub.status)) cerradas.push(r.issue)
+      fatal = `la integradora empeoró con un merge que el motor no aprobó (${etiqueta}): ${g.motivos.join('; ')}`
+      avisos.push(fatal)
+      log(`■ ${fatal} — no se despacha nada más; Leo tiene que mirar`)
     }
   }
-
-  wavesReporte.push(waveResumen)
-  if (wave === A.maxWaves) wavesAgotadas = true
-  log(`✔ wave ${wave} cerrada: ${waveResumen.merges.length} merges procesados, ${waveResumen.impl.length} impls — output ${Math.round(budget.spent() / 1000)}k`)
+  base = { commit: med.commit, arbol: med.arbol, metricas: aBaseline(med) }
+  log(
+    `base ${etiqueta}: ${Object.entries(med.metrics).map(([k, v]) => `${k}=${v}`).join(' ')} testsRojos=${med.tests_failed}` +
+      ` (tests por ${med.tests_fuente ?? '?'})${med.lockfiles_ajenos.length ? ` lockfilesAjenos=${med.lockfiles_ajenos.join(',')}` : ''}`
+  )
+  return true
 }
 
 // --- Marcar para Leo (§3.16): etiqueta + comentario + lista de bloqueadas -----
 // El registro queda "bloqueado por el motor" solo si la etiqueta se puso: así,
 // si después alguien la saca, la vuelta del trabajo es un hecho nuevo.
-async function marcarIssue(n, motivo, FASE, worktree) {
+async function marcarIssue(n, motivo, fase, worktree) {
   const r = await serializar(
     `La issue #${n} queda para Leo: ${motivo}.
 1. CHECK: si la issue ya tiene la etiqueta agent-blocked y un comentario de la corrida ${A.runLabel} con este motivo: 'ya_estaba' y TERMINÁ.
@@ -1112,49 +1045,54 @@ async function marcarIssue(n, motivo, FASE, worktree) {
       worktree ? `\n3. CONSERVÁ el worktree ${worktree}: tiene el trabajo commiteado y no está en ningún otro lado. No lo limpies.` : ''
     }`,
     `block-i${n}`,
-    FASE
+    fase
   )
   if (r && r.status !== 'blocked') registro.bloqueado(`i${n}`, { ultimo: motivo })
   bloqueadas.push(`#${n} ${motivo}${worktree ? ` (worktree: ${worktree})` : ''}`)
   return r
 }
 
-async function marcarPr(prNum, motivo, FASE, { conservar = null } = {}) {
+async function marcarPr(prNum, motivo, fase, { conservar = null } = {}) {
   const r = await serializar(
     `El PR #${prNum} queda para Leo: ${motivo}.
 1. CHECK: gh pr view ${prNum} --json state,mergedAt,labels → si ya está mergeado: 'ya_estaba' y TERMINÁ (no etiquetes ni comentes).
 2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado, si quedó: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
 3. ${conservar ? `Si existe el worktree ${conservar}, CONSERVALO: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
     `block-pr${prNum}`,
-    FASE
+    fase
   )
   if (r && r.status !== 'blocked') registro.bloqueado(`pr${prNum}`, { ultimo: motivo })
+  mergesReporte.push({ pr: prNum, resultado: 'merge-blocked', motivo })
+  if (arregloDe.has(prNum)) {
+    humanos.push({ titulo: `los arreglos de la revisión del PR #${arregloDe.get(prNum)} (PR #${prNum}) quedaron merge-blocked`, decision_necesaria: motivo })
+    await cerrarRevisionDeArreglos({ pr: prNum, de: arregloDe.get(prNum) }, `bloqueados, para Leo (merge-blocked: ${motivo})`)
+  }
   return r
 }
 
-// --- implementer + gate por issue (cadena secuencial; corre en paralelo entre issues)
-async function implementarConGate(iss, FASE, deny) {
+// ---------------------------------------------------------------------------
+// Carril de implementación
+// ---------------------------------------------------------------------------
+async function implementarConGate(iss, b) {
   const tier = A.issueTiers?.[String(iss.number)] ?? T.implementer
   const esfuerzo = effortDeIssue(iss.number)
-  // Una branch por intento: si un hecho nuevo re-despacha la issue, la branch del
-  // intento anterior sigue checkouteada en su worktree conservado, y `checkout -B`
-  // con el mismo nombre falla (o, peor, deja huérfanos esos commits). El PR se liga
-  // a la issue por el "Closes #N" del body, no por el nombre.
+  const desde = esIdDeGit(b?.commit) ? b.commit : `origin/${RAMA}`
+  // Una branch por intento (§3.16): la del intento anterior sigue en su worktree conservado.
   const intento = registro.dato(`i${iss.number}`)?.intentos ?? 1
   const branch = intento > 1 ? `issue-${iss.number}-v${intento}` : `issue-${iss.number}`
-  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]}, effort ${esfuerzo})${intento > 1 ? ` — intento ${intento}, branch ${branch}` : ''}`)
+  log(`dispatched implementer:#${iss.number} (${tier}→${M[tier]}, effort ${esfuerzo}) desde ${desde.slice(0, 12)}${intento > 1 ? ` — intento ${intento}, branch ${branch}` : ''}`)
   const impl = await llamar(
     (suf) => `Implementá la issue #${iss.number} ("${iss.title}") del repo en tu worktree AISLADO (tu cwd). No salgas de él.
 
-PASO 0 (obligatorio — la base se toma del REMOTO, §3.11):
-  git fetch origin && git checkout -B ${branch} origin/${RAMA}
+PASO 0 (obligatorio — la base la fija el motor y se toma del REMOTO, §3.11):
+  git fetch origin && git checkout -B ${branch} ${desde}
   ${DEPS('.')}   (deja las dependencias iguales al lockfile; reinstala solo si cambió)
   Si tu slice cambia dependencias: ${REGLA_DEPS}
 PASO 1: leé el contrato — es el BODY del ticket: gh issue view ${iss.number} (gh solo LECTURA: prohibida toda mutación remota).
 PASO 2: subí la escalera de intención: sh ${READ_CLI} intent ${iss.number} --dir ${REPO}
   Te devuelve, del spec padre, el '## Out of Scope' (lo que NO tenés que construir) y el '## Testing Decisions' con los SEAMS pre-acordados —testeá ahí y no donde te resulte cómodo—, más el índice de ADRs y la rama del prototipo si hay. Abrí solo lo que tu slice consume.
-PASO 3: implementá el slice vertical con tu disciplina TDD completa (roja→verde por criterio de aceptación).${deny}
-PASO 4: verificate: typecheck + suite de tests del repo. Ningún test antes-verde puede quedar rojo.
+PASO 3: implementá el slice vertical con tu disciplina TDD completa (roja→verde por criterio de aceptación).${DENY}
+PASO 4: verificate con el typecheck y los tests de TU ÁREA: los archivos de test que agregaste o tocaste y los del módulo que cambiaste. La suite completa NO: la corre un medidor aparte apenas terminás, y esperarla minutos vence la caché de tu contexto (en 1017b, 32 reescrituras de 200-300K tokens). Las pruebas contra proveedores o recursos reales que el repo pide al tocar algo (lo dice su CLAUDE.md; por ejemplo, una variable que las habilita) sí son tuyas: el medidor no las corre.
 PASO 5: git add -A && git commit (mensaje descriptivo). NO pushees, NO gh pr create — el pipeline publica por vos.
 Si un error destapa un BUG REAL preexistente: NO lo arregles, anotalo en bugs_reales.
 Si el ticket es inimplementable/ambiguo: explicalo en 'bloqueado' y NO inventes.
@@ -1166,15 +1104,14 @@ tokens leídos, más que 13 reviewers juntos):
   - Corré typecheck y tests con el reporter MÁS SILENCIOSO que tenga el runner (p.ej. --reporter=dot,
     -q, --quiet) y filtrá la salida a lo accionable (\`| tail -40\`, \`grep -A5 -i 'fail\\|error'\`).
     NUNCA vuelques suites verdes completas ni logs de build enteros.
-  - Mientras iterás en rojo, corré SOLO los tests del archivo/área que estás tocando; la suite
-    completa va una vez al final (PASO 3) — el pipeline la vuelve a correr igual con un medidor aparte.
+  - Mientras iterás en rojo, corré SOLO los tests del archivo/área que estás tocando.
   - No releas un archivo que ya leíste: editá con el contenido que ya tenés en contexto.
   - No hagas \`cat\` de archivos largos ni \`git diff\` completos para "chequear": leé rangos.
 
 Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, branch, resumen, bugs_reales, bloqueado.${suf}`,
     {
       label: `implementer:#${iss.number}`,
-      phase: FASE,
+      phase: 'Despacho',
       model: M[tier],
       effort: esfuerzo,
       isolation: 'worktree',
@@ -1185,8 +1122,8 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
   if (!impl) return { issue: iss.number, gate: 'ERROR', motivos: ['implementer murió'] }
   if (impl.bloqueado) return { issue: iss.number, gate: 'FAIL', motivos: [`ticket: ${impl.bloqueado}`], impl }
 
-  let med = await medirFirme(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
-  let g = gate(med, baseMetrics, { vedados: VEDADOS })
+  let med = await medirFirme(impl.worktree, 'Despacho', `i${iss.number}`, { conDiff: true })
+  let g = gate(med, b.metricas, { vedados: VEDADOS })
   // Si el gate no pudo medir, reintentar al implementer es mandarlo a arreglar el medidor.
   if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
   if (!g.pass) {
@@ -1194,197 +1131,362 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
     await llamar(
       (suf) => `Sos el implementer de la issue #${iss.number} en tu SEGUNDO y ÚLTIMO intento. Tu trabajo está en ${impl.worktree} (branch ${impl.branch}) — cd ahí primero.
-El gate (comparación numérica contra el baseline de la wave) falló por:
+El gate (comparación numérica contra la integradora de la que partiste) falló por:
 ${g.motivos.map((m) => `  - ${m}`).join('\n')}
-Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, commit local al final).${suf}`,
-      { label: `retry:#${iss.number}`, phase: FASE, model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
+Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, tests de tu área y no la suite completa, commit local al final).${suf}`,
+      { label: `retry:#${iss.number}`, phase: 'Despacho', model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
     )
-    med = await medirFirme(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
-    g = gate(med, baseMetrics, { vedados: VEDADOS })
+    med = await medirFirme(impl.worktree, 'Despacho', `i${iss.number}-retry`, { conDiff: true })
+    g = gate(med, b.metricas, { vedados: VEDADOS })
     if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
     if (!g.pass && med?.arbol) memoria.olvidar(med.arbol)
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
-  if (g.pass) arbolDeIssue.set(iss.number, med.arbol)
-  return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl }
+  return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl, arbol: g.pass ? med.arbol : null }
 }
 
-// ===========================================================================
-// GUARDIA DE CIERRE (§3.14) — agotar el tope no puede tirar la corrida entera
-//
-// Hasta 4.14 cada eslabón serial costaba DOS waves (implementar + mergear) y un scope
-// de 5 eslabones con maxWaves=10 consumía el tope justo al terminar de implementar.
-// Desde 4.15 el scout post-merge despacha el eslabón siguiente en la misma wave (una
-// wave por eslabón), pero el tope sigue pudiendo caer en la última. Con el `all_done` decidiéndose sólo al ABRIR una wave, ese final —
-// 7 issues DONE, sin review fleet y sin PR final — era el peor posible: todo el
-// gasto hecho y nada del cierre (corrida prd-0030-0818, destrabada a mano con
-// resumeFromRunId + maxWaves=14). Un scout más, el rol más barato, distingue
-// "no llegué" de "llegué justo en la última".
-// ===========================================================================
-if (!allDone && wavesAgotadas) {
-  log(`■ maxWaves (${A.maxWaves}) agotadas — verificando si el scope quedó completo antes de cerrar`)
-  const verif = await scoutear('cierre', 'Cierre')
-  registrarScout(verif)
-  if (verif?.all_done) {
-    allDone = true
-    log(`✔ el scope quedó completo en la última wave — sigue a Review y PR final pese al tope`)
-  } else {
-    cortePorWaves = true
-    const falta = (verif?.issues ?? []).filter((i) => i.bucket !== 'DONE' && i.bucket !== 'SPEC').length
-    pendientes.push(
-      `tope de waves alcanzado con ${falta || 'varias'} issue(s) sin cerrar — relanzá con maxWaves ≥ eslabones_seriales + 2`
+async function publicarIssue(r) {
+  const publicar = (intento, extra = '') =>
+    serializar(
+      `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
+1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 4.
+2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, ${
+        (r.impl.recursos_verificados ?? []).length
+          ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
+          : ''
+      }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
+3. VERIFICÁ: gh pr view ${r.impl.branch} --json number,state → el PR existe; su número va en pr_number.
+4. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree del merge. Solo conservalo si el push o el PR fallaron.
+Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle.${extra}`,
+      intento === 1 ? `publish-i${r.issue}` : `publish-i${r.issue}~p${intento}`,
+      'Despacho'
     )
-    log(`■ tope de waves alcanzado y el scope sigue incompleto (${falta} pendiente(s)) — sin review ni PR final`)
+  let pub = await publicar(1)
+  // §3.16 — a lo sumo UN reintento, y de la publicación sola: el trabajo ya está
+  // hecho y medido. Lo que rechaza el remoto dos veces no lo arregla reimplementar.
+  if (pub?.status === 'blocked') {
+    log(`publish #${r.issue}: blocked (${pub.detalle}) → reintento de solo la publicación`)
+    pub = await publicar(2, `\n\nINTENTO 2 de la publicación: el anterior terminó 'blocked' (${pub.detalle}). El trabajo ya está commiteado en el worktree: no se reimplementa nada. Verificá qué quedó hecho (push, PR) antes de cada paso y completá solo lo que falta.`)
   }
+  log(`publish #${r.issue}: ${pub?.status ?? 'serializer murió'} ${pub?.pr_number ? `→ PR #${pub.pr_number}` : ''}`)
+  if (pub?.status === 'blocked') {
+    // Si Leo la destraba (arregla el token, por ejemplo), corresponde volver a publicar
+    // este worktree, no reimplementar: queda anotado.
+    registro.anotar(`i${r.issue}`, { publicable: { titulo: r.titulo, impl: r.impl, arbol: r.arbol } })
+    await marcarIssue(r.issue, `publicación bloqueada dos veces: ${pub.detalle}`, 'Despacho', r.impl.worktree)
+    return
+  }
+  if (pub?.pr_number && esIdDeGit(r.arbol)) arbolPorPr.set(pub.pr_number, r.arbol)
+  // Publicado, el worktree se limpia: un comentario posterior ya no puede nombrarlo.
+  registro.anotar(`i${r.issue}`, { ultimo: pub ? `publicado (${pub.status})` : 'la publicación no devolvió resultado', ...(pub ? { worktree: null, publicable: null } : {}) })
 }
 
-// ===========================================================================
-// FASE: Review fleet nativa (§3.7) — solo si el scope quedó completo
-// ===========================================================================
-let reviewReporte = { corrida: false }
-if (allDone) {
-  phase('Review')
-  const okBudget = !BUDGET_TOTAL || restante() >= A.minBudgetWave
-  if (!okBudget) {
-    log(`■ review salteada por budget (quedan ${Math.round(restante() / 1000)}k)`)
-    pendientes.push('review fleet (budget)')
-  } else {
-    // 1. Análisis integral + partición en unidades de review (T razonador)
-    const part = await llamar(
-      (suf) => `Sos el PARTICIONADOR de un review fleet. SOLO LEÉS.
-1. cd ${WT_INTEGRACION} && git fetch origin && git pull --ff-only
-2. Estudiá el diff INTEGRADO completo: git diff origin/${BASE}...HEAD — como un todo, no PR por PR: mapa de módulos tocados, seams nuevos, contratos cambiados, estado compartido. Leé GLOSSARY.md (o CONTEXT.md si el repo no migró) y docs/adr/ si existen.
-3. Particioná en unidades de review = superficies cohesivas del estado FINAL (módulo + sus seams, ~≤1.5k líneas relevantes por unidad, máx 6). Las fronteras salen del dominio y la estructura del repo, NUNCA de cómo se despachó el trabajo (waves/issues son artefactos de scheduling).
-Reportá por schema: analisis (el mapa) y unidades (nombre, paths, seams).${suf}`,
-      { label: 'review:particion', phase: 'Review', model: M[T.reviewer], effort: E.particionador, schema: PARTICION_SCHEMA }
+function despacharIssue(iss) {
+  const n = iss.number
+  const b = base // la integradora de la que parte, y contra la que la mide su gate
+  enVuelo.add(n)
+  registro.intento(`i${n}`, { ultimo: 'el implementer no devolvió resultado' })
+  suelto(`i${n}`, async () => {
+    try {
+      // Destrabada una publicación bloqueada, se republica su worktree: el trabajo ya
+      // estaba hecho y medido (al integrarlo, el motor vuelve a mirar la no-regresión).
+      const p = registro.dato(`i${n}`)?.publicable
+      if (p) log(`#${n} destrabada: se republica el worktree conservado ${p.impl.worktree}, sin reimplementar`)
+      const r = p ? { issue: n, titulo: p.titulo, gate: 'PASS', motivos: [], impl: p.impl, arbol: p.arbol } : await implementarConGate(iss, b)
+      trabajos.push({ issue: r.issue, gate: r.gate, motivos: r.motivos })
+      bugsReales.push(...(r.impl?.bugs_reales ?? []).map((x) => `[#${r.issue}] ${x}`))
+      if (r.impl?.worktree) registro.anotar(`i${n}`, { worktree: r.impl.worktree })
+      if (r.gate === 'PASS') await publicarIssue(r)
+      else if (r.gate === 'FAIL') await marcarIssue(n, `gate FAIL tras el reintento: ${(r.motivos ?? []).join('; ')}`, 'Despacho', r.impl?.worktree)
+      else if (r.gate === 'MEDICION') await marcarIssue(n, `el medidor no pudo medir (problema del medidor, no del código): ${(r.motivos ?? []).join('; ')}`, 'Despacho', r.impl?.worktree)
+      else registro.anotar(`i${n}`, { ultimo: (r.motivos ?? []).join('; ') })
+    } finally {
+      enVuelo.delete(n)
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Carril de merge (serial)
+// ---------------------------------------------------------------------------
+async function refrescar() {
+  const n = refrescos + 1
+  const r = await serializar(
+    `Refresh de la rama integradora: traer origin/${BASE} a ${RAMA} (merge, nunca rebase).
+1. cd ${WT_INTEGRACION} && git fetch origin && git pull --ff-only origin ${RAMA}
+2. cd ${WT_INTEGRACION} && git merge --no-edit origin/${BASE}
+   - Sin conflicto (o ya al día): push si hubo merge nuevo (contexto audit: refresh-${n}) y status 'ok' (o 'ya_estaba').
+   - CON CONFLICTO: NO resuelvas. git merge --abort y status 'blocked' con la lista de archivos en conflicto en detalle.
+3. cd ${WT_INTEGRACION} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion = la primera línea, arbol_integracion = la segunda, TAL CUAL.`,
+    `refresh-${n}`,
+    'Merge',
+    REFRESCO_SCHEMA
+  )
+  refrescos++
+  baseMovida = false
+  if (r?.status === 'blocked') {
+    log(`refresh ${n} conflictúa (${r.detalle}) → merge-resolver`)
+    const v = await resolver(
+      `## Workspace
+Worktree: ${WT_INTEGRACION} (rama ${RAMA}, worktree local de integración). Tarea: mergear origin/${BASE} en ${RAMA}.
+Corré vos: cd ${WT_INTEGRACION} && git merge origin/${BASE} — y resolvé los conflictos EN LOS ARCHIVOS.
+
+## Intent packet
+Rama integradora del pipeline ${A.runLabel} (scope ${SCOPE_DESC}): acumula los PRs de las issues del scope. ${BASE} trae trabajo externo al pipeline. Criterio: preservar AMBAS intenciones; ante incompatibilidad semántica real, ABORT + INCOMPATIBLE.
+
+## Conflicto reportado
+${r.detalle}`,
+      `refresh-${n}`,
+      'Merge'
     )
-    if (!part) {
-      log('✖ particionador murió — review salteada')
-      pendientes.push('review fleet (particionador murió)')
-    } else {
-      const unidades = part.unidades.slice(0, 6)
-      log(`review: ${unidades.length} unidades — ${unidades.map((u) => u.nombre).join(', ')}`)
+    if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
+      fatal = `refresh ${BASE}→${RAMA} incompatible: ${v?.resumen ?? 'resolver murió'}`
+      log(`■ ${fatal} — no se despacha nada más; Leo tiene que mirar`)
+      return
+    }
+    const push = await serializar(
+      `El merge-resolver dejó resuelto y commiteado el merge de origin/${BASE} en ${WT_INTEGRACION}. Verificá que el merge esté cerrado (sin conflict markers, working tree limpio) y pusheá ${RAMA} (contexto audit: refresh-resolved-${n}). Si el árbol NO está limpio: status 'blocked'. Al final: cd ${WT_INTEGRACION} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion, arbol_integracion TAL CUAL.`,
+      `refresh-push-${n}`,
+      'Merge',
+      REFRESCO_SCHEMA
+    )
+    if (!push || push.status === 'blocked') {
+      fatal = `refresh resuelto sin publicar: ${push?.detalle ?? 'serializer murió'}`
+      log(`■ ${fatal}`)
+      return
+    }
+    await fijarBase(push.commit_integracion, push.arbol_integracion, `refresh-${n}`)
+    return
+  }
+  if (r) await fijarBase(r.commit_integracion, r.arbol_integracion, `refresh-${n}`)
+}
 
-      // 2. Reviewers: 2 lentes por unidad + integración si hay 2+ (paralelo, read-only)
-      const lentes = [
-        { key: 'arch', desc: 'ARQUITECTURA (lente deep-modules): profundidad de módulos, seams, deletion test, interfaz-como-superficie-de-test. ¿La unidad es un módulo profundo o una fachada rota?' },
-        { key: 'impl', desc: 'IMPLEMENTACIÓN CRÍTICA: bugs de correctitud, seguridad (OWASP), manejo de errores, consistencia con las convenciones del repo, code smells con consecuencia real.' },
-      ]
-      // El alcance de lectura de cada reviewer se PRE-FILTRA a los paths de su unidad
-      // (§3.7b): sin esto los 13-15 reviewers releen el diff integrado completo y cada
-      // uno paga ~2.5M de contexto. Restringir el `git diff` NO recorta cobertura —
-      // mismas unidades, mismas lentes, mismo modelo: solo deja de pagarse N veces el
-      // mismo diff. La unidad de integración sí ve todos los paths (los seams son su tema).
-      // '.' = fallback si el particionador no reportó paths para la unidad (= diff completo,
-      // el comportamiento previo): degrada el ahorro, nunca la cobertura.
-      const pathspec = (paths) => (paths ?? []).map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(' ') || '.'
-      const trabajos = unidades.flatMap((u) =>
-        lentes.map((l) => ({
-          etiqueta: `${l.key}:${u.nombre}`,
-          alcance: `git diff origin/${BASE}...HEAD -- ${pathspec(u.paths)}
-   NO corras el git diff completo del repo: otros reviewers cubren el resto en paralelo.`,
-          prompt: `Unidad "${u.nombre}" (paths: ${u.paths.join(', ')}; seams: ${u.seams ?? 'n/a'}). Lente ${l.desc}`,
-        }))
+function promptIntegrar(item, aprobado) {
+  const wt = wtDePr(item.pr)
+  return `Integrar el PR #${item.pr} (branch ${item.branch}${item.esFix ? `, arreglos de la revisión del PR #${item.de}` : `, issue #${item.issue}`}) a ${RAMA}. Las decisiones ya las tomó el motor: están en los pasos 3 y 5 como comandos de shell que imprimen qué hacer. Vos ejecutás lo que imprimen y verificás contra GitHub.
+1. cd ${REPO} && git fetch origin   (si git dice que otro proceso tiene un lock, esperá unos segundos y repetilo una vez)
+2. CHECK: gh pr view ${item.pr} --json state → si ya dice MERGED: hacé el paso 6, status 'ya_estaba', mergeado true, y TERMINÁ.
+3. Worktree del PR en ${wt} — EXACTAMENTE ese path (el medidor mide ahí):
+   a. Si ya existe: cd ${wt} && git pull --ff-only origin ${item.branch} (si falla: status 'blocked' con el error).
+   b. Si no existe, liberá la branch si quedó checkouteada en otro worktree (un leftover del implementer), con este comando tal cual:
+      cd ${REPO} && W=$(git worktree list --porcelain | awk -v b="branch refs/heads/${item.branch}" '/^worktree /{w=substr($0,10)} $0==b{print w}'); if [ -z "$W" ]; then echo LIBRE; elif [ -z "$(git -C "$W" status --porcelain)" ] && git merge-base --is-ancestor "$(git -C "$W" rev-parse HEAD)" origin/${item.branch}; then git worktree remove --force "$W" && git worktree prune && echo LIBERADA; else echo "OCUPADA $W"; fi
+      → OCUPADA: ese worktree tiene trabajo que no está en el remoto. NO lo toques: status 'blocked' con esa línea.
+   c. Si no existe: git worktree add ${wt} ${item.branch}
+4. cd ${wt} && git merge --no-edit origin/${RAMA} → CON conflicto: git merge --abort, status 'conflicto' con los archivos en detalle, y TERMINÁ. NO resuelvas.
+5. cd ${wt} && git status --porcelain | head -5 && case "$(git rev-parse 'HEAD^{tree}')" in ${aprobado ?? 'NINGUNO'}) echo MERGEAR ;; *) echo NO_MERGEAR ;; esac && git rev-parse 'HEAD^{tree}'
+   → arbol = la última línea, TAL CUAL; limpio = ¿el status --porcelain no imprimió nada?
+   → Si imprimió MERGEAR y limpio es true, este comando, tal cual y entero (push, soltar la branch y mergear exactamente ese commit; si una parte falla, no sigue):
+      cd ${wt} && H=$(git rev-parse HEAD) && git push origin HEAD:${item.branch} && cd ${REPO} && git worktree remove --force ${wt} && git worktree prune && gh pr merge ${item.pr} --squash --delete-branch --match-head-commit "$H"
+      (contexto audit: pr-${item.pr}-merge). Si falló: status 'blocked' con el error tal cual. Si salió bien: VERIFICÁ con gh pr view ${item.pr} --json state que diga MERGED (si no, 'blocked'), hacé el paso 6, status 'ok', mergeado true.
+   → Si imprimió NO_MERGEAR (o limpio es false): NO pushees ni mergees. status 'ok', mergeado false: el motor mide ese árbol y decide.
+6. cd ${WT_INTEGRACION} && git pull --ff-only origin ${RAMA} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion = la primera línea, arbol_integracion = la segunda, TAL CUAL.`
+}
+
+// Después de un merge. `confirmado`: el agente reportó, del shell, que mergeó el árbol
+// aprobado y que la integradora quedó en ése; ahí la base sale de la memoria. Si no
+// —un árbol que no era el aprobado, o un 'ya_estaba' que el motor no esperaba—, la
+// base se mide y se vigila: si la integradora empeoró, la corrida se frena.
+async function integrado(item, r, aprobado) {
+  const confirmado = r.status === 'ok' && aprobado !== null && r.arbol === aprobado && r.arbol_integracion === aprobado
+  if (!confirmado && r.status === 'ok') {
+    const aviso = `PR #${item.pr}: el agente mergeó el árbol ${r.arbol}, que no es el aprobado por el motor (${aprobado ?? 'ninguno'})`
+    avisos.push(aviso)
+    log(`⚠ ${aviso}`)
+  }
+  log(`merge PR #${item.pr}: ${r.status}`)
+  mergesReporte.push({ pr: item.pr, resultado: r.status === 'ya_estaba' ? 'ya_estaba' : 'mergeado' })
+  registro.anotar(`pr${item.pr}`, { ultimo: `merge ${r.status}` })
+  if (!item.esFix) cerradas.push(item.issue)
+  await fijarBase(r.commit_integracion, r.arbol_integracion, `pr${item.pr}`, { confirmado, vigilar: !confirmado })
+  if (item.esFix) await cerrarRevisionDeArreglos(item, `mergeados en el PR #${item.pr}`)
+  else encolarRevision({ pr: item.pr, issue: item.issue, titulo: item.titulo })
+}
+
+async function integrarPr(item) {
+  const clave = `pr${item.pr}`
+  const wt = wtDePr(item.pr)
+  // Con la corrida frenada no se registra el intento: un PR sano que vuelve en la foto
+  // siguiente no es "una repetición sin hecho nuevo" para marcarle a Leo.
+  if (fatal) return
+  if (baseMovida) await moviendoIntegradora(refrescar)
+  if (fatal) return
+  registro.intento(clave, { ultimo: 'integración empezada y no terminada' })
+  for (let intento = 1; intento <= 3; intento++) {
+    const aprobado = base ? arbolAprobado(memoria, base.metricas, arbolPorPr.get(item.pr)) : null
+    // Mientras corre un integrar que puede mergear, y hasta fijar la base, la
+    // integradora está en movimiento: el despachador no despacha.
+    integradoraEnMovimiento++
+    let r
+    try {
+      r = await serializar(promptIntegrar(item, aprobado), intento === 1 ? `integrar-pr${item.pr}` : `integrar-pr${item.pr}~i${intento}`, 'Merge', INTEGRAR_SCHEMA)
+      if (r?.mergeado) await integrado(item, r, aprobado)
+    } finally {
+      integradoraEnMovimiento--
+    }
+    if (!r) {
+      log(`⚠ integrar PR #${item.pr}: el serializer murió — si el scout lo vuelve a ofrecer, queda para Leo`)
+      return
+    }
+    if (r.status === 'blocked') {
+      await marcarPr(item.pr, `integración bloqueada: ${r.detalle}`, 'Merge', { conservar: wt })
+      return
+    }
+    if (r.status === 'conflicto') {
+      log(`PR #${item.pr} conflictúa con ${RAMA} (${r.detalle}) → merge-resolver`)
+      const v = await resolver(
+        `## Workspace
+Worktree: ${wt} (branch ${item.branch}). Tarea: mergear origin/${RAMA} en la branch del PR #${item.pr} — corré el merge y resolvé conflictos EN LOS ARCHIVOS, commiteados localmente.
+
+## Intent packet
+${item.esFix ? `PR de arreglos de la revisión del PR #${item.de}: gh pr view ${item.pr}.` : `Issue #${item.issue}: ${item.titulo}. El contrato ES el body del ticket: gh issue view ${item.issue} — y el PR: gh pr view ${item.pr}.
+Si el diff parece exceder lo que el ticket pide, subí un peldaño de la escalera de intención antes de decidir:
+  sh ${READ_CLI} intent ${item.issue} --dir ${REPO}
+te devuelve el '## Out of Scope' y el '## Testing Decisions' del spec padre — la evidencia que tus criterios 1 y 4 necesitan.`}
+Aplicá tus 5 criterios de no-regresión.
+
+## Conflicto reportado
+${r.detalle}`,
+        `pr${item.pr}`,
+        'Merge'
       )
-      if (unidades.length > 1)
-        trabajos.push({
-          etiqueta: 'integracion',
-          alcance: `git diff origin/${BASE}...HEAD -- ${pathspec([...new Set(unidades.flatMap((u) => u.paths ?? []))])}`,
-          prompt: `SOLO los SEAMS ENTRE unidades (contratos, flujo de datos, invariantes cruzadas) que surgen de este análisis integral: ${part.analisis}. Los reviewers por unidad no ven esto; acá es donde se rompen las implementaciones multi-wave.`,
-        })
-
-      // §3.7d — EJE SPEC: +1 reviewer, no +6. El scope creep es una pregunta de
-      // TODO el diff contra TODO el spec: fragmentarlo por unidad le da a cada
-      // reviewer un pedazo de cada uno, que es la receta del falso positivo
-      // ("esto no lo pidió nadie" cuando sí, en la sección que no le tocó). Por
-      // eso este es el único reviewer que ve el diff integrado completo.
-      const specs = [...specsDelScope]
-      if (specs.length > 0)
-        trabajos.push({
-          etiqueta: 'spec',
-          alcance: `git diff origin/${BASE}...HEAD`,
-          prompt: `EJE SPEC — ¿el diff hace lo que el spec pidió, y SOLO eso?
-Leé primero la intención, entera: ${specs.map((s) => `gh issue view ${s}`).join(' && ')} (spec padre del scope; su '## Out of Scope' es la frontera explícita).
-Buscá las dos direcciones: (a) requisitos del spec que el diff NO cumple o cumple a medias; (b) SCOPE CREEP — comportamiento, dependencia o superficie pública que el diff agrega y que ningún ticket ni el spec pidieron.
-No revises arquitectura ni bugs: otros reviewers cubren eso y duplicarlos ensucia el juicio.`,
-        })
-
-      const hallazgosCrudos = (
-        await parallel(
-          trabajos.map((t) => () =>
-            llamar(
-              (suf) => `Sos un REVIEWER read-only del diff integrado ${BASE}...${RAMA}.
-1. cd ${WT_INTEGRACION} (NO modifiques NADA)
-2. Base del review — SOLO tu alcance:
-   ${t.alcance}
-   Leé GLOSSARY.md (o CONTEXT.md)/ADRs si existen, y abrí archivos fuera de tu alcance SOLO si necesitás
-   entender un contrato que tu diff consume (rangos, no archivos enteros).
-3. Tu alcance y lente: ${t.prompt}
-Reportá findings ESTRUCTURADOS (título · file:line · severidad alta/media/baja · por qué importa · fix propuesto). Sin prosa. Lista vacía si no hay nada real — no inventes hallazgos para justificarte.${suf}`,
-              { label: `review:${t.etiqueta}`, phase: 'Review', model: M[T.reviewer], effort: E.reviewer, schema: FINDINGS_SCHEMA }
-            )
-          )
-        )
-      )
-        // La lente se pega ANTES de filtrar: con `.filter(Boolean)` primero, un
-        // reviewer muerto corre los índices y todos los findings siguientes
-        // quedan etiquetados con la lente equivocada — y el ruteo a HUMANO del
-        // eje Spec depende de esa etiqueta.
-        .flatMap((r, idx) => (r?.findings ?? []).map((f) => ({ ...f, lente: trabajos[idx].etiqueta })))
-      log(`review: ${hallazgosCrudos.length} findings crudos de ${trabajos.length} reviewers${specs.length ? ` (eje spec sobre #${specs.join(', #')})` : ''}`)
-
-      // 3. Judge (dedup + APLICAR/RECHAZAR/HUMANO + orden) — barrier necesario
-      let juicio = { aplicar: [], rechazadas: [], humano: [] }
-      if (hallazgosCrudos.length > 0) {
-        juicio =
-          (await llamar(
-            (suf) => `Sos el JUEZ de un review fleet sobre el diff integrado ${BASE}...${RAMA} (repo en ${WT_INTEGRACION}, solo lectura). Scope: ${SCOPE_DESC}.
-
-FINDINGS (${hallazgosCrudos.length}):
-${JSON.stringify(hallazgosCrudos, null, 1)}
-
-Tu deber:
-- Deduplicá solapados entre lentes.
-- Fallá cada uno: APLICAR / RECHAZAR / HUMANO (necesita decisión de Leo), razón de 1 línea.
-- UMBRAL de APLICAR — solo cuatro clases: bug real, seguridad, requisito del spec incumplido, contrato roto. Dentro de esas, pesá: ¿es real (no especulativo)? ¿está en scope? ¿el riesgo del fix supera su beneficio? ¿contradice un ADR o CONTEXT.md?
-- Debajo del umbral —estilo, refactor, nombres, docs, redundancias— va a RECHAZAR con una razón que empieza exactamente por "seguimiento:" y dice en una línea qué se sugiere: el PR final las lista como sugerencias de seguimiento. Los falsos positivos se rechazan con su razón, sin ese prefijo.
-- REGLA DURA — un fix que cambia la forma de una respuesta, un payload o un tipo compartido entre capas (sacar o renombrar un campo, cambiar un tipo) va a HUMANO, nunca a APLICAR, aunque el campo parezca redundante: el consumidor puede tener su propia copia de los tipos y ahí el typecheck no ve la rotura.
-- REGLA DURA — los findings de scope creep de la lente 'spec' (código que ningún ticket ni el spec pidieron) van a HUMANO, nunca a APLICAR: "borrá esta feature que nadie pidió" no es algo que un applier deba ejecutar solo. Los del eje spec que señalan un requisito INCUMPLIDO sí pueden ir a APLICAR.
-- Ordená la lista APLICAR: independientes primero, dependientes al final.
-Vos NO editás código.${suf}`,
-            { label: 'review:judge', phase: 'Review', model: M[T.judge], effort: E.judge, schema: JUICIO_SCHEMA }
-          )) ?? juicio
+      if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
+        await marcarPr(item.pr, `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`, 'Merge', { conservar: wt })
+        return
       }
-      log(`judge: ${juicio.aplicar.length} APLICAR · ${juicio.rechazadas.length} rechazadas · ${juicio.humano.length} para Leo`)
+      continue // la resolución quedó commiteada en el worktree: el árbol nuevo se mide y se integra
+    }
+    if (r.mergeado) return // integrado(): base, revisión y registro
+    // El árbol que quedó no está aprobado: se mide (el medidor verifica con su shell
+    // que es el que el serializer reportó) y el gate decide en código.
+    const med = await medirFirme(wt, 'Merge', `pr${item.pr}`, { esperado: r.arbol })
+    const g = gate(med, base?.metricas ?? { metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles_ajenos: [] }, { exigirTests: false })
+    if (!g.pass) {
+      if (med?.arbol) memoria.olvidar(med.arbol)
+      await marcarPr(item.pr, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, 'Merge', { conservar: wt })
+      return
+    }
+    arbolPorPr.set(item.pr, med.arbol)
+  }
+  await marcarPr(item.pr, 'la integración no convergió en tres intentos (el árbol cambió entre medición y merge)', 'Merge', { conservar: wt })
+}
 
-      // 4. Applier (seriado en un solo worktree/branch review/*) + gate + publish
-      let reviewPr = null
-      if (juicio.aplicar.length > 0) {
-        // §3.7c — APPLIER POR TANDAS. Autopsia 2026-07-27 (corrida prd0019-0722): un
-        // applier único aplicando toda la lista del juez corrió 491 turnos con el contexto
-        // creciendo de 44k a 462k tokens → 115M de tokens leídos, 39% del costo de esa
-        // corrida ENTERA en un solo agente. El contexto se re-envía en cada turno, así que
-        // un agente maratónico paga cuadrático. Trocear en tandas de N fixes le da a cada
-        // una contexto fresco sobre el MISMO worktree/branch (la tanda 1 lo crea aislado,
-        // las siguientes hacen cd): mismos fixes, mismo orden, mismo gate, ~1/4 del costo.
-        const CHUNK = A.applierChunk ?? 4
-        const tandas = []
-        for (let i = 0; i < juicio.aplicar.length; i += CHUNK) tandas.push(juicio.aplicar.slice(i, i + CHUNK))
-        log(`review: ${juicio.aplicar.length} fixes → ${tandas.length} tanda(s) de hasta ${CHUNK}`)
+function encolarMerge(item) {
+  if (item.esFix && item.de) arregloDe.set(item.pr, item.de)
+  enMerge.add(`pr${item.pr}`)
+  colaMerge.push(item)
+  asegurarCarriles()
+}
 
-        let apl = null
-        for (const [idx, tanda] of tandas.entries()) {
-          const primera = idx === 0
-          const paso0 = primera
-            ? `PASO 0: git fetch origin && git checkout -B review/${A.runLabel} origin/${RAMA} && ${DEPS('.')}`
-            : `PASO 0: cd ${apl.worktree} — worktree YA preparado por la tanda anterior (branch ${apl.branch}, ${apl.aplicadas} fix(es) ya aplicados y commiteados). NO hagas checkout, NO resetees, NO toques los commits previos.`
-          const r = await llamar(
-            (suf) => `Sos el APPLIER del review fleet — tanda ${idx + 1} de ${tandas.length}.${primera ? ' Trabajás en tu worktree AISLADO (tu cwd).' : ''}
+// ---------------------------------------------------------------------------
+// Carril de revisión (serial): un revisor y un aplicador por PR mergeado (§3.7)
+// ---------------------------------------------------------------------------
+function encolarRevision(item) {
+  if (revisadosEnCorrida.has(item.pr)) return
+  revisadosEnCorrida.add(item.pr)
+  colaRevision.push(item)
+  asegurarCarriles()
+}
+
+function registroComoTexto(rev) {
+  const h = rev.hallazgos ?? []
+  const lineas = h.map((x) => `- [${x.decision}] ${x.titulo} (${x.ubicacion}, ${x.severidad}): ${x.razon}`)
+  return [
+    `Revisión del pipeline ${A.runLabel}: ${h.length} hallazgo(s) — ${h.filter((x) => x.decision === 'aplicar').length} a aplicar, ${h.filter((x) => x.decision === 'humano').length} para Leo, ${h.filter((x) => x.decision === 'seguimiento').length} de seguimiento.`,
+    ...lineas,
+    rev.aplicados.length ? `Aplicados: ${rev.aplicados.join('; ')}.` : '',
+    rev.fallados.length ? `No aplicados: ${rev.fallados.map((f) => `${f.titulo} (${f.motivo})`).join('; ')}.` : '',
+    rev.pr_arreglos ? `Arreglos en el PR #${rev.pr_arreglos}: ${rev.arreglos_estado ?? 'pendientes'}.` : '',
+  ].filter(Boolean).join('\n')
+}
+
+async function revisarPr(item) {
+  if (!presupuestoOk()) {
+    pendientes.push(`revisión del PR #${item.pr} (budget)`)
+    revisiones.push({ pr: item.pr, issue: item.issue, estado: 'salteada por budget', hallazgos: null, aplicados: [], fallados: [], pr_arreglos: null })
+    return
+  }
+  const rev = await llamar(
+    (suf) => `Sos el REVISOR del PR #${item.pr} (issue #${item.issue}: ${item.titulo}), ya mergeado a ${RAMA} por el pipeline ${A.runLabel}. Sos la única revisión que va a tener este código: nadie lo vuelve a mirar después, y el gate solo cuenta números (typecheck, tests). SOLO LEÉS.
+1. Lo que entró: cd ${REPO} && gh pr diff ${item.pr}
+   Para el contexto, leé los archivos en el estado del merge, no en un working tree (otro carril del pipeline los está moviendo): cd ${REPO} && git fetch origin && C=$(gh pr view ${item.pr} --json mergeCommit --jq .mergeCommit.oid) && git show "$C:<path>" (rangos, no archivos enteros).
+2. La intención: gh issue view ${item.issue} (el contrato) y sh ${READ_CLI} intent ${item.issue} --dir ${REPO} (el '## Out of Scope' y el '## Testing Decisions' del spec padre). GLOSSARY.md (o CONTEXT.md) y docs/adr/ en el mismo commit, si existen.
+3. Revisá con tres lentes, en ese orden: correctitud y seguridad (bugs, OWASP, manejo de errores, datos que se pierden o se duplican); arquitectura (módulos profundos, seams, contratos entre capas); spec (lo pedido y solo eso: requisitos incumplidos y scope creep).
+4. Decidí cada hallazgo:
+   - aplicar: SOLO bug real, seguridad, requisito incumplido o contrato roto, con un arreglo local que no cambia la forma de nada compartido. Escribí el arreglo concreto en fix.
+   - humano: el arreglo cambia la forma de una respuesta, un payload o un tipo compartido entre capas (el consumidor puede tener su propia copia de los tipos y el typecheck no ve la rotura); o es scope creep (algo que ni el ticket ni el spec pidieron: "borrá esto" no lo ejecuta un aplicador solo); o necesita una decisión.
+   - seguimiento: debajo del umbral — estilo, refactor, nombres, docs, redundancias.
+   Un falso positivo no se reporta. Lista vacía si no hay nada real: no inventes hallazgos para justificarte.
+Reportá por schema: resumen y hallazgos.${suf}`,
+    { label: `revisor:pr${item.pr}`, phase: 'Revisión', model: M[T.reviewer], effort: E.reviewer, schema: REVISION_SCHEMA }
+  )
+  const registroRev = { pr: item.pr, issue: item.issue, resumen: rev?.resumen ?? null, hallazgos: rev?.hallazgos ?? null, aplicados: [], fallados: [], pr_arreglos: null }
+  revisiones.push(registroRev)
+  if (!rev) {
+    humanos.push({ titulo: `la revisión del PR #${item.pr} no corrió`, decision_necesaria: 'revisarlo a mano o relanzar: el PR quedó sin la etiqueta pipeline-revisado' })
+    return
+  }
+  for (const h of rev.hallazgos) {
+    if (h.decision === 'seguimiento') seguimientos.push({ pr: item.pr, titulo: h.titulo, ubicacion: h.ubicacion, razon: h.razon })
+    if (h.decision === 'humano') humanos.push({ titulo: `[PR #${item.pr}] ${h.titulo}`, decision_necesaria: `${h.razon} (${h.ubicacion})` })
+  }
+  const aplicar = rev.hallazgos.filter((h) => h.decision === 'aplicar')
+  log(`revisión PR #${item.pr}: ${rev.hallazgos.length} hallazgo(s), ${aplicar.length} a aplicar`)
+  if (aplicar.length) await aplicarArreglos(item, aplicar, registroRev)
+  // Con arreglos publicados, el registro espera a que entren (o queden para Leo): la
+  // etiqueta pipeline-revisado dice "revisado y resuelto", y un relanzamiento la lee.
+  if (registroRev.pr_arreglos) revisionPorArreglo.set(registroRev.pr_arreglos, registroRev)
+  else await registrarRevision(item.pr, registroRev)
+}
+
+// Registro durable, en el PR revisado: lo que encontró el revisor, lo que aplicó el
+// aplicador y qué pasó con sus arreglos. `rev` null: la revisión fue de una corrida
+// anterior y solo se sabe el destino de sus arreglos.
+async function registrarRevision(prRevisado, rev, nota = '') {
+  const texto = rev ? registroComoTexto(rev) : `Revisión de una corrida anterior del pipeline. ${nota}`
+  await serializar(
+    `Registrar la revisión del PR #${prRevisado}:
+1. CHECK: gh pr view ${prRevisado} --json labels → si ya tiene la etiqueta pipeline-revisado: 'ya_estaba' y TERMINÁ.
+2. Escribí este texto TAL CUAL en un archivo temporal con un heredoc ENTRECOMILLADO (así el shell no ejecuta nada de lo que diga) y comentá con él:
+   F=$(mktemp) && cat > "$F" <<'FIN_DEL_REGISTRO_PIPELINE'
+${texto}
+FIN_DEL_REGISTRO_PIPELINE
+   y después: gh pr comment ${prRevisado} --body-file "$F" (contexto audit: review-pr-${prRevisado}-registro)
+3. gh pr edit ${prRevisado} --add-label pipeline-revisado`,
+    `registro-revision-pr${prRevisado}`,
+    'Revisión'
+  )
+}
+
+// Los arreglos de una revisión entraron o quedaron para Leo: se cierra su registro.
+async function cerrarRevisionDeArreglos(item, estado) {
+  const rev = revisionPorArreglo.get(item.pr) ?? null
+  revisionPorArreglo.delete(item.pr)
+  const de = rev?.pr ?? item.de ?? arregloDe.get(item.pr)
+  if (!de) return
+  if (rev) rev.arreglos_estado = estado
+  await registrarRevision(de, rev, `Arreglos en el PR #${item.pr}: ${estado}.`)
+}
+
+async function aplicarArreglos(item, aplicar, registroRev) {
+  const b = base // la integradora con el PR revisado ya adentro
+  const desde = esIdDeGit(b?.commit) ? b.commit : `origin/${RAMA}`
+  const rama = `review/${A.runLabel}-pr${item.pr}`
+  const CHUNK = A.applierChunk ?? 4
+  const tandas = []
+  for (let i = 0; i < aplicar.length; i += CHUNK) tandas.push(aplicar.slice(i, i + CHUNK))
+  let apl = null
+  for (const [idx, tanda] of tandas.entries()) {
+    const primera = idx === 0
+    const paso0 = primera
+      ? `PASO 0: git fetch origin && git checkout -B ${rama} ${desde} && ${DEPS('.')}`
+      : `PASO 0: cd ${apl.worktree} — worktree YA preparado por la tanda anterior (branch ${apl.branch}, ${apl.aplicados.length} arreglo(s) ya commiteados). NO hagas checkout, NO resetees, NO toques los commits previos.`
+    const r = await llamar(
+      (suf) => `Sos el APLICADOR de la revisión del PR #${item.pr}${tandas.length > 1 ? ` — tanda ${idx + 1} de ${tandas.length}` : ''}.${primera ? ' Trabajás en tu worktree AISLADO (tu cwd).' : ''}
 ${paso0}
-Aplicá EN ORDEN estos fixes aprobados por el juez (y SOLO estos — los de otras tandas NO son tuyos):
-${tanda.map((f, i) => `${i + 1}. [${f.ubicacion}] ${f.titulo} → ${f.fix}`).join('\n')}
-Por cada fix: aplicá, corré build/tests del área tocada; si rompe, REVERTILO (no "fixes forward") y anotalo en falladas.
-${REGLA_DEPS} Trabajás con las dependencias ya instaladas: reinstalar corresponde solo cuando el fix mismo es de dependencias.
+Aplicá EN ORDEN estos arreglos que decidió el revisor (y SOLO estos):
+${tanda.map((f, i) => `${i + 1}. [${f.ubicacion}] ${f.titulo} → ${f.fix ?? f.por_que}`).join('\n')}
+Por cada uno: aplicá, corré build/tests del área tocada; si rompe, REVERTILO (no "fixes forward") y anotalo en fallados con el motivo.${DENY}
+${REGLA_DEPS} Trabajás con las dependencias ya instaladas: reinstalar corresponde solo cuando el arreglo mismo es de dependencias.
 Al final: git add -A && git commit. NO pushees, NO gh.
 
 DISCIPLINA DE CONTEXTO (tu contexto se re-envía entero en CADA turno: lo que arrastrás lo pagás N veces):
@@ -1393,88 +1495,231 @@ DISCIPLINA DE CONTEXTO (tu contexto se re-envía entero en CADA turno: lo que ar
   - Corré SOLO los tests del área que tocás, no la suite completa: el pipeline la mide aparte después.
   - No releas archivos que ya leíste; editá con lo que ya tenés en contexto. Leé rangos, no archivos enteros.
 
-Reportá por schema: worktree (pwd absoluto), branch, aplicadas (cuántos de ESTA tanda), falladas, resumen.${suf}`,
-            {
-              label: `review:applier${tandas.length > 1 ? `-t${idx + 1}` : ''}`,
-              phase: 'Review',
-              model: M[T.applier],
-              effort: E.applier,
-              ...(primera ? { isolation: 'worktree' } : {}),
-              schema: APPLIER_SCHEMA,
-            }
-          )
-          if (!r) {
-            log(`⚠ applier tanda ${idx + 1}/${tandas.length} murió — se conserva lo aplicado hasta acá`)
-            juicio.humano.push({
-              titulo: `tanda ${idx + 1} del applier no corrió`,
-              decision_necesaria: `quedaron sin aplicar: ${tanda.map((f) => f.titulo).join('; ')}`,
-            })
-            break
-          }
-          apl = primera
-            ? { ...r, falladas: r.falladas ?? [] }
-            : {
-                worktree: apl.worktree,
-                branch: apl.branch,
-                aplicadas: apl.aplicadas + (r.aplicadas ?? 0),
-                falladas: [...apl.falladas, ...(r.falladas ?? [])],
-                resumen: `${apl.resumen}\n${r.resumen ?? ''}`.trim(),
-              }
-        }
-        if (apl && apl.aplicadas > 0) {
-          const medRev = await medirFirme(apl.worktree, 'Review', 'review-fixes', { conDiff: false })
-          // all_done en la wave 1 hace break antes de capturar baseline y la review
-          // llega con baseMetrics null (corrida 16-17-0806) — recapturar acá.
-          if (!baseMetrics) {
-            const baseRev = await medirFirme(WT_INTEGRACION, 'Review', 'baseline-review', { pull: true, esperado: arbolIntegradora })
-            if (baseRev?.status === 'ok') baseMetrics = aBaseline(baseRev)
-            else log(`⚠ baseline-review inválido (${baseRev?.error ?? 'validator murió'}) — gate de fixes solo con tests`)
-          }
-          const gRev = gate(medRev, baseMetrics ?? { metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles_ajenos: [] }, { exigirTests: false })
-          if (gRev.pass) {
-            const pubRev = await serializar(
-              `Publicar y mergear los fixes del review (worktree ${apl.worktree}, branch ${apl.branch}):
-1. CHECK identidad de trabajo: ¿PR de ${apl.branch} ya mergeado? → 'ya_estaba'.
-2. push -u origin ${apl.branch} && gh pr create --base ${RAMA} --label ${A.labels.agentPr} --label review-fix --title "review: fixes del fleet (${A.runLabel})" --body con el resumen del applier + "🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: review-pr-create)
-3. gh pr merge --squash --delete-branch del PR creado (contexto audit: review-pr-merge). En ${WT_INTEGRACION}: git pull --ff-only.`,
-              'review-publish',
-              'Review'
-            )
-            reviewPr = pubRev?.pr_number ?? null
-            log(`review: ${apl.aplicadas} fixes mergeados${reviewPr ? ` (PR #${reviewPr})` : ''}`)
-          } else {
-            log(`review: fixes NO pasan el gate (${gRev.motivos.join(' | ')}) — descartados, worktree conservado para autopsia`)
-            juicio.humano.push({ titulo: 'fixes del review no pasaron el gate', decision_necesaria: `revisar ${apl.worktree}: ${gRev.motivos.join('; ')}` })
-          }
-        }
+Reportá por schema: worktree (pwd absoluto), branch, aplicados (títulos de ESTA tanda), fallados, resumen.${suf}`,
+      {
+        label: `aplicador:pr${item.pr}${tandas.length > 1 ? `-t${idx + 1}` : ''}`,
+        phase: 'Revisión',
+        model: M[T.applier],
+        effort: E.applier,
+        ...(primera ? { isolation: 'worktree' } : {}),
+        schema: APPLIER_SCHEMA,
       }
-      reviewReporte = { corrida: true, unidades: unidades.map((u) => u.nombre), findings: hallazgosCrudos.length, juicio, review_pr: reviewPr }
+    )
+    if (!r) {
+      registroRev.fallados.push(...tanda.map((f) => ({ titulo: f.titulo, motivo: 'la tanda del aplicador no corrió' })))
+      break
     }
+    apl = primera ? { ...r } : { ...apl, aplicados: [...apl.aplicados, ...(r.aplicados ?? [])], fallados: [...apl.fallados, ...(r.fallados ?? [])] }
+    registroRev.aplicados.push(...(r.aplicados ?? []))
+    registroRev.fallados.push(...(r.fallados ?? []))
+  }
+  if (!apl || registroRev.aplicados.length === 0) return
+  const med = await medirFirme(apl.worktree, 'Revisión', `arreglos-pr${item.pr}`, { conDiff: true })
+  const g = gate(med, b?.metricas ?? { metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles_ajenos: [] }, { exigirTests: false, vedados: VEDADOS })
+  if (!g.pass) {
+    humanos.push({ titulo: `los arreglos de la revisión del PR #${item.pr} no pasaron el gate`, decision_necesaria: `revisar ${apl.worktree}: ${g.motivos.join('; ')}` })
+    registroRev.fallados.push(...registroRev.aplicados.map((t) => ({ titulo: t, motivo: 'el conjunto no pasó el gate' })))
+    registroRev.aplicados = []
+    return
+  }
+  const pub = await serializar(
+    `Publicar los arreglos de la revisión del PR #${item.pr} (worktree ${apl.worktree}, branch ${apl.branch}):
+1. CHECK identidad de trabajo: ¿hay PR (abierto o mergeado) de la branch ${apl.branch}? → reportá su número en pr_number ('ya_estaba') y saltá a 4.
+2. cd ${apl.worktree} && git push -u origin ${apl.branch}, después gh pr create --base ${RAMA} --head ${apl.branch} --label ${A.labels.agentPr} --label review-fix --title "revisión del PR #${item.pr}: arreglos (${A.runLabel})" --body con: "Arreglos de la revisión del PR #${item.pr}:", una línea por cada uno de estos —${registroRev.aplicados.join('; ')}— y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: review-pr-${item.pr}-create)
+3. VERIFICÁ: gh pr view ${apl.branch} --json number,state → su número va en pr_number.
+4. Si el PR existe: git worktree remove --force ${apl.worktree} && git worktree prune. Si el push o el PR fallaron: conservá el worktree y status 'blocked' con el error tal cual.`,
+    `publish-arreglos-pr${item.pr}`,
+    'Revisión'
+  )
+  if (pub?.pr_number && pub.status !== 'blocked') {
+    registroRev.pr_arreglos = pub.pr_number
+    if (esIdDeGit(med.arbol)) arbolPorPr.set(pub.pr_number, med.arbol)
+    log(`revisión PR #${item.pr}: arreglos en el PR #${pub.pr_number} → cola de merge`)
+    encolarMerge({ pr: pub.pr_number, branch: apl.branch, titulo: `arreglos de la revisión del PR #${item.pr}`, esFix: true, de: item.pr })
+  } else {
+    humanos.push({ titulo: `los arreglos de la revisión del PR #${item.pr} no se publicaron`, decision_necesaria: `${pub?.detalle ?? 'el serializer murió'} — worktree ${apl.worktree}` })
   }
 }
 
+async function correrCarril(cola, fn, clave) {
+  while (cola.length) {
+    const item = cola.shift()
+    try {
+      await fn(item)
+    } catch (e) {
+      log(`⚠ ${clave(item)}: ${String(e).slice(0, 200)}`)
+    }
+    if (clave(item).startsWith('pr')) enMerge.delete(clave(item))
+    terminar(clave(item))
+  }
+}
+
+function asegurarCarriles() {
+  if (!carrilMerge && colaMerge.length)
+    carrilMerge = correrCarril(colaMerge, integrarPr, (x) => `pr${x.pr}`).finally(() => {
+      carrilMerge = null
+      timbre.avisar()
+    })
+  if (!carrilRevision && colaRevision.length)
+    carrilRevision = correrCarril(colaRevision, revisarPr, (x) => `rev${x.pr}`).finally(() => {
+      carrilRevision = null
+      timbre.avisar()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// El despachador
+// ---------------------------------------------------------------------------
+phase('Despacho')
+let estado = null // DONE | BLOCKED | BUDGET_CUT | ABORT
+let detalleFinal = ''
+let vuelta = 0
+let foto = null
+let fotoPedida = 0
+let fotoRefrescos = 0
+while (true) {
+  vuelta++
+  fotoPedida = eventos
+  fotoRefrescos = refrescos
+  if (vuelta === 1 && A.scopeInicial) {
+    foto = A.scopeInicial
+    log('scout inicial: pre-fetch de T0 (sin agente)')
+  } else foto = await scoutear(`d${vuelta}`, 'Despacho')
+  if (!foto) {
+    if (algoEnVuelo()) {
+      log(`⚠ scout ${vuelta} murió — se reintenta con el próximo evento`)
+      await timbre.esperar()
+      continue
+    }
+    estado = 'ABORT'
+    detalleFinal = 'el scout murió sin nada en vuelo'
+    break
+  }
+  registrarScout(foto)
+  const buckets = {}
+  for (const i of foto.issues ?? []) (buckets[i.bucket] ??= []).push(i)
+  log(`scout ${vuelta}: ${(foto.issues ?? []).length} issues — ${Object.entries(buckets).map(([b, l]) => `${b}:${l.length}`).join(' ')}`)
+  for (const i of buckets.HUMAN_GATED ?? []) bloqueadas.push(`#${i.number} HUMAN_GATED: ${i.detalle ?? i.title}`)
+  inReviewUltimo = (buckets.IN_REVIEW ?? []).map((i) => `#${i.number} IN_REVIEW (PR #${i.pr_number ?? '?'}): ${i.detalle ?? i.title} — requiere intervención humana antes de re-correr`)
+  // Si un refresh terminó mientras corría este scout, su dato de la base ya es viejo.
+  if (fotoRefrescos === refrescos) baseMovida = typeof foto.base_por_integrar === 'number' ? foto.base_por_integrar > 0 : true
+
+  // --- Paralelismo en caliente: el menor entre maxParallel, la perilla y el vigía.
+  const cuota = vigia.leer(foto.cuota, MAX_P)
+  const nuevoP = Math.min(MAX_P, foto.paralelo ?? MAX_P, cuota.P)
+  if (nuevoP !== P || vuelta === 1) log(`paralelismo: ${nuevoP} carril(es)${foto.paralelo ? ` (perilla: ${foto.paralelo})` : ''} — cuota: ${cuota.motivo}`)
+  P = nuevoP
+
+  // --- Arranque: la integradora al día con la base y medida, antes de despachar nada.
+  if (!base) {
+    if (baseMovida) await moviendoIntegradora(refrescar)
+    if (!fatal && !base) await fijarBase(setup.commit, setup.arbol, 'inicial')
+    if (!base) {
+      estado = fatal ? 'BLOCKED' : 'ABORT'
+      detalleFinal = fatal ?? 'la integradora no se pudo medir (medición inválida nunca es éxito)'
+      break
+    }
+    continue // una foto nueva, ya con la base fijada
+  }
+
+  // --- PRs a la cola de merge: los de las issues y los de arreglos de revisión que el
+  // scout ve listos y nadie está integrando. Con la corrida frenada, ninguno.
+  for (const a of foto.arreglos ?? []) if (a.de) arregloDe.set(a.pr_number, a.de)
+  for (const a of (foto.arreglos ?? []).filter((x) => x.bucket === 'IN_REVIEW'))
+    inReviewUltimo.push(`PR #${a.pr_number} (arreglos de la revisión del PR #${a.de ?? '?'}) en IN_REVIEW — requiere intervención humana`)
+  const listos = [
+    ...(buckets.MERGE_READY ?? []).map((iss) => ({ pr: iss.pr_number, issue: iss.number, branch: iss.pr_branch, titulo: iss.title })),
+    ...(foto.arreglos ?? []).filter((a) => a.bucket === 'MERGE_READY').map((a) => ({ pr: a.pr_number, branch: a.pr_branch, esFix: true, de: a.de, titulo: `arreglos de la revisión del PR #${a.de ?? '?'}` })),
+  ]
+  for (const item of fatal ? [] : listos) {
+    const clave = `pr${item.pr}`
+    if (enMerge.has(clave) || terminoEn[clave] > fotoPedida) continue
+    if (registro.decidir(clave) === 'para_leo') {
+      await marcarPr(item.pr, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clave).ultimo})`, 'Merge', { conservar: wtDePr(item.pr) })
+      continue
+    }
+    encolarMerge(item)
+  }
+
+  // --- PRs mergeados sin revisar (de esta corrida o de una anterior que se cortó).
+  // Sin el dato, se revisa (revisar de más es caro; saltear una revisión, peor). Uno
+  // cuyos arreglos todavía no entraron no se revisa de nuevo: se registra al entrar.
+  const conArreglosPendientes = new Set([...arregloDe.values()])
+  for (const iss of buckets.DONE ?? [])
+    if (iss.pr_number && iss.revisado !== true && !enMerge.has(`pr${iss.pr_number}`) && !conArreglosPendientes.has(iss.pr_number))
+      encolarRevision({ pr: iss.pr_number, issue: iss.number, titulo: iss.title })
+
+  // --- Implementación: llenar los carriles libres, nunca más que lo habilitado.
+  const ofrecidas = (buckets.IMPLEMENTABLE ?? []).filter((i) => !enVuelo.has(i.number) && !(terminoEn[`i${i.number}`] > fotoPedida))
+  const vuelven = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'para_leo')
+  const nuevas = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'despachar')
+  for (const iss of vuelven) {
+    const d = registro.dato(`i${iss.number}`)
+    await marcarIssue(iss.number, `volvió a IMPLEMENTABLE en la misma corrida sin un hecho nuevo (último resultado: ${d.ultimo})`, 'Despacho', d.worktree)
+  }
+  if (!sinBudget && !presupuestoOk()) {
+    sinBudget = true
+    log(`■ budget: quedan ${Math.round(restante() / 1000)}k < ${Math.round(A.minBudgetWave / 1000)}k mínimos — no se despacha trabajo nuevo; se termina lo que está en vuelo`)
+  }
+  // Con la integradora en movimiento (un merge sin base fijada todavía) no se despacha:
+  // el carril de merge toca el timbre después de fijar la base.
+  if (!sinBudget && !fatal && integradoraEnMovimiento === 0) {
+    const libres = Math.max(0, P - enVuelo.size)
+    for (const iss of nuevas.slice(0, libres)) despacharIssue(iss)
+    if (nuevas.length > libres) log(`${nuevas.length - libres} issue(s) habilitada(s) esperan carril (P=${P}): ${nuevas.slice(libres).map((i) => `#${i.number}`).join(' ')}`)
+  } else if (nuevas.length && (sinBudget || fatal)) pendientes.push(...nuevas.map((i) => `#${i.number} sin despachar (${fatal ? 'corrida frenada' : 'budget'})`))
+  asegurarCarriles()
+  // El vigía mide la velocidad por carril-hora: le cuenta lo que queda corriendo
+  // desde ahora hasta la próxima lectura, ya con lo recién despachado.
+  vigia.enCurso(enVuelo.size + (carrilRevision ? 1 : 0))
+
+  // --- ¿Terminó? Solo con una foto posterior al último evento y nada en vuelo.
+  if (!algoEnVuelo()) {
+    if (eventos !== fotoPedida) continue // algo terminó mientras corría el scout: otra foto
+    if (fatal) estado = 'BLOCKED'
+    else if (foto.all_done) {
+      allDone = true
+      estado = 'DONE'
+    } else if (sinBudget) estado = 'BUDGET_CUT'
+    else {
+      estado = 'BLOCKED'
+      log(`■ BLOCKED: sin trabajo accionable (${(buckets.BLOCKED_BY_DEP ?? []).length} por deps, ${(buckets.HUMAN_GATED ?? []).length} humanas, ${(buckets.IN_REVIEW ?? []).length} in-review) — Leo tiene que intervenir`)
+    }
+    detalleFinal = fatal ?? ''
+    break
+  }
+  await timbre.esperar()
+}
+
 // ===========================================================================
-// FASE: Cierre — PR draft rama → base + reporte
+// FASE: Cierre — PR draft rama → base + reporte (con la cola de revisión vacía)
 // ===========================================================================
 phase('Cierre')
 let prFinal = null
-// §3.7 — lo que el juez dejó debajo del umbral viaja al PR final como seguimiento, no se aplica.
-const seguimientos = (reviewReporte.juicio?.rechazadas ?? []).filter((r) => /^seguimiento:/i.test(r.razon ?? ''))
 if (allDone) {
   const issuesCierre = [...new Set(cerradas)]
   const bloqueCierre = issuesCierre.length
     ? `\n\nCLAVE — autocierre: el body DEBE incluir, en líneas propias, exactamente: ${issuesCierre.map((n) => `Closes #${n}`).join(', ')}. Son las issues cuyo PR por-issue fue contra la rama integradora (no la default), donde GitHub ignora el "Closes"; recién este PR final va a la default branch, así que ES el único lugar donde el autocierre surte efecto al mergearse. NO omitas ninguna ni uses otra redacción (nada de "issues cerradas: #N" en prosa — tiene que ser la keyword "Closes #N" que GitHub reconoce).`
     : ''
+  const bloqueRevision = revisiones.length
+    ? `\n\nEl body lleva una sección "## Revisión por PR" con estas líneas tal cual (un revisor y, si hizo falta, un aplicador por PR; el detalle está comentado en cada PR):\n${revisiones
+        .map((r) =>
+          r.hallazgos === null
+            ? `   - PR #${r.pr}: ${r.estado ?? 'la revisión no corrió'}`
+            : `   - PR #${r.pr}: ${r.hallazgos.length} hallazgo(s), ${r.aplicados.length} aplicado(s)${r.fallados.length ? `, ${r.fallados.length} sin aplicar` : ''}${r.pr_arreglos ? ` (arreglos en el PR #${r.pr_arreglos}: ${r.arreglos_estado ?? 'pendientes'})` : ''}`
+        )
+        .join('\n')}`
+    : ''
   const bloqueSeguimiento = seguimientos.length
-    ? `\n\nEl body lleva además una sección "## Sugerencias de seguimiento" con estas líneas tal cual (el review las dejó debajo del umbral de aplicar: no se aplicaron):\n${seguimientos
-        .map((r) => `   - ${r.titulo}${r.ubicacion ? ` (${r.ubicacion})` : ''}: ${r.razon.replace(/^seguimiento:\s*/i, '')}`)
+    ? `\n\nEl body lleva además una sección "## Sugerencias de seguimiento" con estas líneas tal cual (la revisión las dejó debajo del umbral de aplicar: no se aplicaron):\n${seguimientos
+        .map((r) => `   - [PR #${r.pr}] ${r.titulo}${r.ubicacion ? ` (${r.ubicacion})` : ''}: ${r.razon}`)
         .join('\n')}`
     : ''
   const cierre = await serializar(
     `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}.
 1. cd ${WT_INTEGRACION} && git pull --ff-only
 2. CHECK identidad de trabajo: ¿ya existe PR (abierto o mergeado) ${RAMA} → ${BASE}? → reportá su número ('ya_estaba'). Si ya existe y está ABIERTO pero su body NO trae los "Closes #" de abajo, editalo con gh pr edit para agregarlos.
-3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), nota del review fleet, y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}${bloqueSeguimiento}
+3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}${bloqueRevision}${bloqueSeguimiento}
 4. Sobre el PR (nuevo o 'ya_estaba', si está ABIERTO): gh pr comment <numero> --body "@coderabbitai review" — CodeRabbit skipea drafts y bases no-default por config, el comentario fuerza la review externa; el T0 triagea sus observaciones después (contexto audit: pr-final-coderabbit). Idempotencia: si el PR ya tiene un comentario "@coderabbitai review", no dupliques.`,
     'pr-final',
     'Cierre'
@@ -1483,21 +1728,25 @@ if (allDone) {
 }
 
 const reporte = {
-  status: allDone ? 'DONE' : cortePorWaves ? 'WAVE_CAP' : pendientes.length ? 'BUDGET_CUT' : 'BLOCKED',
+  status: estado,
   corrida: A.runLabel,
   ts_lanzamiento: A.ts,
   scope: A.scope,
   rama: RAMA,
   pr_final_draft: prFinal,
-  waves: wavesReporte,
-  review: reviewReporte,
-  // Cada scout re-anota las HUMAN_GATED: sin deduplicar, la misma línea salía una vez por wave.
+  detalle: detalleFinal || undefined,
+  trabajos,
+  merges: mergesReporte,
+  revisiones,
+  // Cada scout re-anota las HUMAN_GATED: sin deduplicar, la misma línea salía una vez por vuelta.
   bloqueadas: [...new Set(bloqueadas)],
   pendientes,
   bugs_reales_para_issues: bugsReales,
   seguimientos,
+  avisos,
   para_leo: [
-    ...(reviewReporte.juicio?.humano ?? []).map((h) => `[review] ${h.titulo}: ${h.decision_necesaria}`),
+    ...humanos.map((h) => `[revisión] ${h.titulo}: ${h.decision_necesaria}`),
+    ...avisos,
     ...new Set(bloqueadas),
     ...inReviewUltimo,
   ],
@@ -1505,7 +1754,7 @@ const reporte = {
   tokens_output: budget.spent(),
 }
 log(
-  `■ fin ${A.runLabel}: ${reporte.status} — waves=${wavesReporte.length}` +
-    `${prFinal ? ` · PR final draft #${prFinal}` : ''} · bloqueadas=${bloqueadas.length} · bugs anotados=${bugsReales.length} · output ${Math.round(budget.spent() / 1000)}k`
+  `■ fin ${A.runLabel}: ${reporte.status}${prFinal ? ` · PR final draft #${prFinal}` : ''} · ${trabajos.length} implementación(es), ${mergesReporte.length} merge(s), ${revisiones.length} revisión(es)` +
+    ` · bloqueadas=${reporte.bloqueadas.length} · bugs anotados=${bugsReales.length} · output ${Math.round(budget.spent() / 1000)}k`
 )
 return reporte

@@ -4,6 +4,8 @@ description: Engine-invoked only: implements one vertical slice from a GH issue 
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 effort: xhigh
+experimental:
+  cacheTtl: 1h
 ---
 
 You are **parallel-implementer**, a specialized subagent invoked by the v4 engine (`workflows/prd-pipeline.js`, plugin: `host-orchestrator`). One instance per issue, running in parallel siblings in their own worktrees.
@@ -86,7 +88,7 @@ Before you emit `<promise>COMPLETE</promise>`:
 1. **Re-read the ticket**.
 2. **For each acceptance criterion**: name the test that covers it AND the `file:line` where it lives.
 3. **For each layer touched by the slice**: list the files created/modified in that layer.
-4. **Run typecheck + the new tests**. Both MUST be green. Capture output.
+4. **Run typecheck + the tests of your area** (the new ones and those of the modules you changed). Both MUST be green. Capture output. The full suite is not yours: the engine runs it with a separate measurer right after you finish, and waiting minutes on it lets your prompt cache expire. Tests the repo requires against real providers or resources when their area is touched (its `CLAUDE.md` says so) are yours, because the measurer does not run them.
 5. **Confirm no test left as `.skip` / `.only` / stub-returning-constant**.
 6. **Apply the bronze rule to each new test**: "would this fail if I deleted the implementation?" If any test fails the bronze rule, fix it before emitting COMPLETE.
 7. **For each live resource your slice names**: confirm you verified it against the real thing from this worktree, and that the line in `<resources-verified>` says how and when. A resource you assumed rather than checked is a `RESOURCE_UNREACHABLE` waiting to happen in production.
@@ -208,7 +210,7 @@ If your CWD is unclear, run `pwd` first. You should be inside `.claude/worktrees
 2. **Establish base**: `git status` + `git log -1` so you know what HEAD looks like.
 3. **Read the briefing materials** in the order from section 6.
 4. **Iterate TDD** per criterion (section 2). Commit after each green-with-refactor (multiple commits OK — the host pushes all of them).
-5. **Run typecheck + tests** at the end. Capture output.
+5. **Run typecheck + the tests of your area** at the end (see §4). Capture output.
 6. **Self-check** (section 4) honestly. Either complete or block — no middle ground.
 7. **Emit XML** (section 7) as your final tool output. No prose before or after the envelope.
 

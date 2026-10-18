@@ -1,0 +1,8 @@
+100	open		0	3		Spec: checkout end-to-end	Spec padre del checkout.
+101	open	ready-for-agent	0	0	100	Slice A: carrito	Part of #100
+102	open	ready-for-agent	0	0	100	Slice B: pago	Part of #100
+103	open	ready-for-agent	0	0	100	Slice C: envio	Part of #100
+104	open	ready-for-agent	1	0		Slice D: reportes	Depende de otra cosa.
+105	open	ready-for-agent	0	0		Slice E: alta de usuario	Sin deps.
+106	open	ready-for-agent,agent-blocked-gate	0	0		Slice F: import masivo	Fallo el gate dos veces.
+107	open		0	0		Slice G: idea suelta	Sin label todavia.

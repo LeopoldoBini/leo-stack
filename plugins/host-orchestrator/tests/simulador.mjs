@@ -80,9 +80,12 @@ export async function correrMotor({ mundo, args = {}, budget } = {}) {
   const agent = async (prompt, opts = {}) => {
     const reg = { ...opts, prompt, inicio: performance.now() - t0 }
     llamadas.push(reg)
+    // Como un agente real: actúa al empezar (lee GitHub, mergea, mide) y reporta al
+    // terminar. Con duraciones, un scout puede llegar con una foto vieja y un
+    // serializer de integrar puede haber mergeado mucho antes de reportarlo.
+    const r = await mundo.responder(prompt, opts)
     const ms = mundo.duracion?.(opts.label, prompt) ?? 0
     if (ms) await esperar(ms)
-    const r = await mundo.responder(prompt, opts)
     reg.fin = performance.now() - t0
     reg.respuesta = r
     return r === undefined ? null : structuredClone(r)
@@ -139,7 +142,7 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       const pr = prDeIssue(n)
       let bucket
       const extra = {}
-      if (pr && pr[1].merged) bucket = 'DONE'
+      if (pr && pr[1].merged) { bucket = 'DONE'; extra.pr_number = pr[0]; extra.pr_branch = pr[1].branch; extra.revisado = pr[1].labels.has('pipeline-revisado') }
       else if (i.labels.has('agent-blocked')) bucket = 'HUMAN_GATED'
       else if (pr && !pr[1].labels.has('merge-blocked')) { bucket = 'MERGE_READY'; extra.pr_number = pr[0]; extra.pr_branch = pr[1].branch }
       else if (pr) { bucket = 'IN_REVIEW'; extra.pr_number = pr[0]; extra.pr_branch = pr[1].branch }
@@ -150,11 +153,20 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     }
     const c = (b) => lista.filter((x) => x.bucket === b).length
     const all_done = c('MERGE_READY') + c('IMPLEMENTABLE') + c('IN_REVIEW') === 0 && c('DONE') > 0
-    return { all_done, issues: lista, specs: [], notas: 'mundo simulado', ...(mundo.paralelo != null ? { paralelo: mundo.paralelo } : {}) }
+    const arreglos = [...prs.entries()]
+      .filter(([, p]) => p.fixDe && !p.merged)
+      .map(([num, p]) => ({ pr_number: num, pr_branch: p.branch, bucket: p.labels.has('merge-blocked') ? 'IN_REVIEW' : 'MERGE_READY', de: p.fixDe }))
+    return {
+      all_done, issues: lista, arreglos, specs: [], notas: 'mundo simulado',
+      base_por_integrar: mundo.basePorIntegrar,
+      ...(mundo.paralelo != null ? { paralelo: mundo.paralelo } : {}),
+      ...(mundo.cuota ? { cuota: mundo.cuota() } : {}),
+    }
   }
 
   const dondeDe = (prompt) => prompt.match(/Cada comando empieza con `cd (\S+) &&`/)?.[1]
   const esIntegracion = (path) => /\/\.host-orchestrator\/wt\/(wf_)?batch-sim$/.test(path ?? '')
+  const deLaIntegracion = () => ({ commit_integracion: commitDe(arbolIntegracion()), arbol_integracion: arbolIntegracion() })
 
   function validator(label, prompt) {
     const etiqueta = label.slice('validator:'.length).replace(/~.*$/, '')
@@ -201,8 +213,13 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
   function serializer(label, prompt) {
     const tarea = label.slice('serializer:'.length).replace(/~.*$/, '')
     let m
-    if (tarea === 'setup-rama') return { status: 'ok', detalle: 'rama lista', token }
-    if (/^refresh/.test(tarea)) return { status: 'ya_estaba', detalle: 'al día' }
+    if (tarea === 'setup-rama') return { status: 'ok', detalle: 'rama lista', token, commit: commitDe(arbolIntegracion()), arbol: arbolIntegracion() }
+    if (/^refresh/.test(tarea)) {
+      mundo.refrescos++
+      const traido = mundo.basePorIntegrar > 0
+      if (traido) { mergeadas.push(...(mundo.deLaBase ?? [8000])); mundo.basePorIntegrar = 0 }
+      return { status: traido ? 'ok' : 'ya_estaba', detalle: traido ? 'base integrada' : 'al día', ...deLaIntegracion() }
+    }
     if ((m = tarea.match(/^publish-i(\d+)$/))) {
       const n = Number(m[1])
       const intento = contar(`pub:${n}`)
@@ -215,24 +232,34 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       prs.set(num, { issue: n, branch: `issue-${n}`, merged: false, labels: new Set(['afk-agent-pr']), arbol: wts.get(wt)?.arbol })
       return { status: 'ok', pr_number: num, detalle: `PR #${num}` }
     }
-    if ((m = tarea.match(/^prep-pr(\d+)$/))) {
+    if ((m = tarea.match(/^publish-arreglos-pr(\d+)$/))) {
+      const wt = prompt.match(/worktree (\S+), branch/)?.[1]
+      const num = proximoPr++
+      prs.set(num, { issue: null, fixDe: Number(m[1]), branch: `review/sim-1018-pr${m[1]}`, merged: false, labels: new Set(['afk-agent-pr', 'review-fix']), arbol: wts.get(wt)?.arbol })
+      return { status: 'ok', pr_number: num, detalle: `PR #${num}` }
+    }
+    if ((m = tarea.match(/^integrar-pr(\d+)$/))) {
       const num = Number(m[1])
       const pr = prs.get(num)
-      if (pr.merged) return { status: 'ya_estaba', detalle: 'ya mergeado' }
-      const path = prompt.match(/Worktree efímero en (\S+)/)?.[1]
+      const intento = contar(`integrar:${num}`)
+      mundo.integraciones.push(num)
+      if (pr.merged) return { status: 'ya_estaba', mergeado: true, detalle: 'ya mergeado', ...deLaIntegracion() }
+      const f = fallas.integrar?.(num, intento)
+      if (f === 'muere') return null
+      if (f === 'conflicto') return { status: 'conflicto', mergeado: false, detalle: 'src/a.ts' }
+      if (typeof f === 'string') return { status: 'blocked', mergeado: false, detalle: f }
       pr.arbol = arbol([...conjuntoDe.get(pr.arbol), ...mergeadas])
-      wts.set(path, { arbol: pr.arbol, issue: pr.issue })
-      return { status: 'ok', detalle: path }
-    }
-    if ((m = tarea.match(/^merge-pr(\d+)$/))) {
-      const num = Number(m[1])
-      const intento = contar(`merge:${num}`)
+      const wt = prompt.match(/Worktree del PR en (\S+)/)?.[1]
+      wts.set(wt, { arbol: pr.arbol, issue: pr.issue })
+      const aprobado = prompt.match(/in ([0-9a-f]{40}|NINGUNO)\) echo MERGEAR/)?.[1]
+      const desobedece = fallas.desobedece?.(num)
+      if (aprobado !== pr.arbol && !desobedece) return { status: 'ok', mergeado: false, arbol: pr.arbol, limpio: true, detalle: 'árbol nuevo' }
       const motivo = fallas.merge?.(num, intento)
       if (motivo === 'muere') return null
-      if (motivo) return { status: 'blocked', detalle: motivo }
-      const pr = prs.get(num)
-      if (!pr.merged) { pr.merged = true; mergeadas.push(pr.issue) }
-      return { status: 'ok', pr_number: num, detalle: 'mergeado' }
+      if (motivo) return { status: 'blocked', mergeado: false, detalle: motivo }
+      pr.merged = true
+      mergeadas.push(pr.issue ?? 9000 + pr.fixDe)
+      return { status: desobedece === 'ya_estaba' ? 'ya_estaba' : 'ok', mergeado: true, arbol: pr.arbol, limpio: true, pr_number: num, detalle: 'mergeado', ...deLaIntegracion() }
     }
     if ((m = tarea.match(/^block-i(\d+)$/))) {
       const n = Number(m[1])
@@ -242,10 +269,28 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       mundo.bloqueos.push(n)
       return { status: 'ok', detalle: 'etiquetada' }
     }
-    if ((m = tarea.match(/^(gatefail|block)-pr(\d+)$/))) { prs.get(Number(m[2])).labels.add('merge-blocked'); return { status: 'ok', detalle: 'merge-blocked' } }
-    if (tarea === 'review-publish') return { status: 'ok', pr_number: 900, detalle: 'review mergeado' }
+    if ((m = tarea.match(/^block-pr(\d+)$/))) { prs.get(Number(m[1])).labels.add('merge-blocked'); return { status: 'ok', detalle: 'merge-blocked' } }
+    if ((m = tarea.match(/^registro-revision-pr(\d+)$/))) {
+      const pr = prs.get(Number(m[1]))
+      mundo.registros.push({ pr: Number(m[1]), texto: prompt.match(/<<'FIN_DEL_REGISTRO_PIPELINE'\n([\s\S]*?)\nFIN_DEL_REGISTRO_PIPELINE/)?.[1] })
+      if (pr.labels.has('pipeline-revisado')) return { status: 'ya_estaba', detalle: 'ya registrado' }
+      pr.labels.add('pipeline-revisado')
+      return { status: 'ok', detalle: 'registrado' }
+    }
     if (tarea === 'pr-final') return { status: 'ok', pr_number: 999, detalle: 'PR final draft' }
     return { status: 'ok', detalle: `sin efecto (${tarea})` }
+  }
+
+  function revisor(label) {
+    const pr = Number(label.match(/pr(\d+)/)[1])
+    return { resumen: 'revisado', hallazgos: mundo.hallazgos?.(pr) ?? [] }
+  }
+  function aplicador(label) {
+    const pr = Number(label.match(/pr(\d+)/)[1])
+    const path = `/repo/.claude/worktrees/wf_apl-${pr}`
+    wts.set(path, { arbol: arbol([...mergeadas, 9000 + pr]) })
+    const titulos = (mundo.hallazgos?.(pr) ?? []).filter((h) => h.decision === 'aplicar').map((h) => h.titulo)
+    return { worktree: path, branch: `review/sim-1018-pr${pr}`, aplicados: titulos, fallados: [], resumen: 'aplicado' }
   }
 
   function review(label) {
@@ -261,8 +306,13 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
     bloqueos: [],
     marcas: [],
     branches: [],
+    integraciones: [],
+    registros: [],
+    refrescos: 0,
+    basePorIntegrar: 0,
     paralelo: null,
     veces,
+    arbolDe: (set) => arbol(set),
     prs,
     issue,
     mergeadas,
@@ -279,6 +329,8 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       if (label.startsWith('retry:')) return { worktree: 'x', branch: 'x', resumen: 'retry' }
       if (label.startsWith('serializer:')) return serializer(label, prompt)
       if (label.startsWith('review:')) return review(label)
+      if (label.startsWith('revisor:')) return revisor(label)
+      if (label.startsWith('aplicador:')) return aplicador(label)
       if (label.startsWith('resolver:')) return { action: 'MERGE', resolution: 'RESOLVED', resumen: 'ok' }
       throw new Error(`el mundo no sabe responder a ${label}`)
     },

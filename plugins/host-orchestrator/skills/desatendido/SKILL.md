@@ -89,7 +89,7 @@ No es prolijidad: es lo único que separa *hecho* de *dice que está hecho*.
 - Esto viaja en el encargo de cada agente que convocás, junto con qué evidencia tiene que traer. Un subagente que vuelve con "quedó andando" no terminó: mandalo de nuevo a buscar la salida.
 - La prueba dura, cuando aplica: **si borrás lo que hiciste, ¿la verificación se pone en rojo?** Si sigue en verde, no estaba verificando nada.
 
-**Lo de una vía no está terminado sin revisión:** `/mattpocock-skills:code-review` en ventana limpia y sus hallazgos arreglados, antes de declarar «Llegué».
+**Lo de una vía no está terminado sin revisión:** `/mattpocock-skills:code-review` en ventana limpia y sus hallazgos arreglados, antes de declarar «Llegué». Lo que entró por `/prd-pipeline` ya la tuvo: su revisor por PR es independiente de quien escribió y cuenta como esa revisión; no se repite.
 
 ### Entregado: donde sobreviva a esta sesión
 

@@ -2,6 +2,24 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.16.0 (2026-10-18)
+
+Las decisiones de Leo sobre la auditoría de las corridas de Radar. Versión aparte de 4.15.0 para poder revertirla sola.
+
+**Despacho continuo en vez de waves con barrera** (spec §3.17). P carriles de implementación, un carril de merge serial y uno de revisión: cada vez que algo termina, el despachador vuelve a leer GitHub y llena los carriles libres. Con barrera cada wave duraba lo que la implementación más lenta (12 a 70 min); la simulación sobre las duraciones reales dio −45 % de reloj. Los serializers siguen siendo la única vía de mutación y ahora pasan por un candado explícito. El estado sigue saliendo de GitHub: matar y relanzar no rehace lo publicado. `resumeFromRunId` reusa poco con despacho continuo (el journal encadena por orden de invocación); el comando recomienda relanzar fresco. `maxWaves` desaparece.
+
+**Integrar un PR en un agente.** Actualizar la rama y, si el árbol que queda es el ya medido y aprobado para ese PR, mergear en el mismo agente; si no, medir, gate, e integrar. La condición la calcula el motor y llega al serializer como un `case` de shell con un solo árbol. El refresh corre solo si la base se movió (en 1017b, 19 de 19 dieron "ya_estaba") y la base después de un merge confirmado sale de la memoria sin medir. Para dos PRs: de 11 agentes Sonnet de ~45K a 3–4 Haiku livianos; el merge-resolver Opus solo con conflicto real.
+
+**Paralelismo y cuota.** P por defecto 3. Baja en caliente con la perilla `.host-orchestrator/paralelo` o con el vigía de cuota, que lee la ventana de 5 h, la semanal y la velocidad de gasto de lo que deja la statusline (`args.cuota`) y nunca baja de 1. Nunca más carriles que issues habilitadas.
+
+**Un revisor y un aplicador por PR mergeado** (spec §3.7). La flota (~17–19 Opus en xhigh, 73 % del costo de una corrida de un ticket) sale. Cada PR mergeado entra a un carril de revisión que corre al lado de las implementaciones; los arreglos salen como PR nuevo a la cola de merge y no frenan las cadenas. Es la única revisión —cuenta como la de ventana limpia— y queda registrada por PR (comentario en el PR, reporte, PR final) para poder medir si se pierde algo. La etiqueta `pipeline-revisado` la lee un relanzamiento.
+
+**Lo que agregó la revisión en ventana limpia de esta versión**: no se despacha con la integradora en movimiento (una dependiente salía de una base sin el código de su bloqueante); un PR en conflicto con la rama va al merge-resolver en vez de quedar para Leo; los PRs de arreglos los lista el CLI y el motor los integra aunque se haya cortado la corrida, y la etiqueta `pipeline-revisado` espera a que entren; el merge es un comando con `--match-head-commit` y un merge no aprobado que empeora la integradora frena la corrida; con la corrida frenada no se marcan PRs sanos; el vigía cuenta los carriles después de despachar y no usa lecturas viejas; una medición en Haiku sin los tests del hook se repite en Sonnet en el acto; liberar una branch ajena es un comando de shell; el registro va por heredoc entrecomillado; el simulador ahora actúa al empezar y reporta al terminar, como los agentes reales, y produce fotos viejas.
+
+**Lo mecánico en Haiku** (spec §3.1). Scout, validator y serializer en T3 por defecto; `args.tiers` vuelve a Sonnet sin editar el motor. El validator corre en T2 mientras no vea que el hook trae los tests: leyendo la salida cruda del runner, Haiku puede dar un falso verde.
+
+**El implementer corre los tests de su área, no la suite** (spec §3.3), y declara caché de prompt de 1 h (`experimental.cacheTtl`). La causa principal de caché vencida era esperar la suite más de 5 min (en 1017b, 32 reescrituras de 200–300K, ~16 % del costo). Las pruebas contra proveedores reales que el repo pide siguen siendo suyas.
+
 ## 4.15.0 (2026-10-18)
 
 Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, devbox). El motor sigue en waves; el despacho continuo y la revisión de un solo agente van aparte, en 4.16.0, para poder revertirlos por separado.
