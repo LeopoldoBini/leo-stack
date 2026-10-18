@@ -207,3 +207,14 @@ test('un medidor que dice "ya medido" sobre un árbol que el motor no tiene no c
   assert.ok(mundo.mediciones.some((m) => m.etiqueta === 'i1'), 'el árbol de la issue se midió de verdad')
   assert.ok(logs.some((l) => /i1 inválida.*no tiene/.test(l)))
 })
+
+// ── Ítem 5: los roles mecánicos corren con el agente liviano ──
+
+test('scout, validator y serializer salen como operador (solo Bash); el implementer con su tipo', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] } } })
+  const { llamadas } = await correrMotor({ mundo })
+  const mecanicos = conLabel(llamadas, /^(scout|validator|serializer):/)
+  assert.ok(mecanicos.length > 5)
+  for (const c of mecanicos) assert.equal(c.agentType, 'host-orchestrator:operador', c.label)
+  for (const c of conLabel(llamadas, /^implementer:/)) assert.equal(c.agentType, 'host-orchestrator:parallel-implementer')
+})

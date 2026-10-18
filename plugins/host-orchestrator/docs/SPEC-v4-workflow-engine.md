@@ -255,6 +255,7 @@ Primer repo con receta: maro-web (Next + Convex), cuyo script levanta un backend
 - **Gate rojo → reintento:** 1 reintento por issue dentro de la corrida, re-despachando el implementer con el output del gate como feedback (worktree conservado). Segundo rojo → label `agent-blocked` + comment con el log (via serializer), la wave sigue con el resto. Sin heroísmos.
 - **Permisos:** AFK real = `--dangerously-skip-permissions` (como hoy; nadie contesta prompts en background). Piloto 2 supervisado = sesión interactiva normal.
 - **Roles de agente:** los `agent()` referencian los `agents/*.md` del plugin via `agentType` (una sola fuente de disciplina).
+- **Agente liviano para lo mecánico (4.15.0):** scout, validator y serializer corren como `agents/operador.md` —`tools: Bash` y nada más—. Como agente genérico del Workflow arrancaban con todo el catálogo (dos Playwright MCP, context7, listados de tools) que no usan: ~42K tokens de prompt de arranque en la devbox (corrida `1017b`) contra 19K del implementer. Medido en la Mac como sesión `claude -p --agent … --output-format json` en el checkout de Radar: `operador` 12,4K, `measurer` 14,0K, `parallel-implementer` 18,4K, sesión con todas las tools 33,1K. Con `tools: Bash` el subagente arranca sin MCP ni ToolSearch, y el Workflow le agrega igual `StructuredOutput` cuando hay `schema`. El operador conserva los `CLAUDE.md` del repo: el serializer y el validator sin hook los necesitan.
 
 ### 3.12 Hardening del script (aprendizajes Piloto 1, 2026-07-17 — obligatorios en el motor)
 

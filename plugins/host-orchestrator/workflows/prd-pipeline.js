@@ -325,6 +325,12 @@ const SCRIPTS = READ_CLI.replace(/\/[^/]*$/, '')
 const DEPS_CLI = `${SCRIPTS}/deps-al-dia.sh`
 const DEPS = (donde) => `bash ${DEPS_CLI} ${donde}`
 
+// Los tres roles mecánicos (scout, validator, serializer) corren como `operador`:
+// solo Bash, sin MCP ni catálogo de tools. Como agente genérico arrancaban en ~42K
+// tokens de prompt (devbox, 1017b) contra 19K del implementer; medido en la Mac
+// como sesión `claude -p --agent`: operador 12K, sesión con todas las tools 33K.
+const OPERADOR = 'host-orchestrator:operador'
+
 // Package manager (autopsia cn-radar-al-dia-0921, 2026-09-21): el applier corrió
 // `npm install` en un repo pnpm y coló dos package-lock.json. Una sola redacción para
 // todo agente que instala dependencias; el gate lo respalda con lockfiles_ajenos (§3.3).
@@ -591,7 +597,7 @@ ${suite}
 4. ${en} git ls-files -- ${GLOBS_LOCKFILE}   → lockfiles = una línea por entrada, tal cual (sin salida → lista vacía).
 ${diff}
 Si un comando no puede correr: status:'error' con el mensaje en 'error'.${suf}`,
-    { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, schema: MEDICION_SCHEMA }
+    { label: `validator:${etiqueta}`, phase: faseTag, model: M[T.validator], effort: E.validator, agentType: OPERADOR, schema: MEDICION_SCHEMA }
   ).then((crudo) => {
     let r = crudo
     if (r?.ya_medido) {
@@ -643,6 +649,7 @@ function serializar(tarea, etiqueta, faseTag, schema = SERIALIZER_SCHEMA) {
     phase: faseTag,
     model: M[T.serializer],
     effort: E.serializer,
+    agentType: OPERADOR,
     schema,
   })
 }
@@ -659,7 +666,7 @@ function scoutear(etiqueta, faseTag) {
 cd ${REPO} && sh ${READ_CLI} scope '${SCOPE_ARG}' --rama ${RAMA} --label-ready ${A.labels.ready} --label-agent-pr ${A.labels.agentPr}
 
 El comando emite exactamente el schema que tenés que reportar (all_done, issues con su bucket y detalle, specs, notas). Copialo: no re-bucketees, no "corrijas" un bucket que te parezca raro, no agregues issues, no opines sobre el código. Si sale con código distinto de 0, reportá issues vacío, all_done false y su stderr en 'notas'.${suf}`,
-    { label: `scout:${etiqueta}`, phase: faseTag, model: M[T.scout], effort: E.scout, schema: SCOUT_SCHEMA }
+    { label: `scout:${etiqueta}`, phase: faseTag, model: M[T.scout], effort: E.scout, agentType: OPERADOR, schema: SCOUT_SCHEMA }
   )
 }
 

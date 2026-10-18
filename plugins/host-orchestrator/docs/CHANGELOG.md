@@ -14,6 +14,8 @@ Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, de
 
 **Cada árbol se mide una vez por corrida, dentro del motor** (spec §3.3). En `1017b`, 27 de 42 mediciones repitieron un árbol ya medido (~160 min): el mismo árbol pasaba por el gate de la issue, el gate pre-merge y el baseline siguiente. El validator reporta el id del árbol; el motor guarda la medición y, si el árbol ya está, el validator saltea la medición y el motor completa con lo guardado. Sale `scripts/gate-cache.sh` con su test: solo envolvía al hook, y Radar no tiene hook, así que nunca corrió. `args.gateCache` ya no se usa. <!-- acta -->
 
+**Agente liviano para lo mecánico** (`agents/operador.md`, spec §3.11). Scout, validator y serializer salían como agente genérico y arrancaban con ~42K tokens de prompt (devbox), cargando tools que no usan. Ahora son `operador`, con `tools: Bash` solo. Medido en la Mac (`claude -p --agent`, checkout de Radar): 12,4K de arranque contra 33,1K de la sesión con todas las tools.
+
 **El motor tiene tests.** `tests/simulador.mjs` corre `prd-pipeline.js` tal cual contra un GitHub y un git de mentira, con agentes falsos por label; las reglas puras viven en un bloque marcado que el test evalúa solo. `node --test 'plugins/host-orchestrator/tests/*.test.mjs'`.
 
 ## 4.14.1 (2026-10-15)

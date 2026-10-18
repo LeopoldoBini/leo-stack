@@ -24,7 +24,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 | El motor ejecutable | `workflows/prd-pipeline.js` |
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
 | Qué se siembra al adoptar el plugin en un repo, incluida la regla de dependencias entre tickets (pocas waves anchas) | `commands/init.md` |
-| Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md` |
+| Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md`, `agents/operador.md` (scout, validator y serializer: solo Bash) |
 | Cómo trabaja un agente sin nadie mirando, dentro o fuera del pipeline | `skills/desatendido/SKILL.md` |
 | Probar en la app: el rol, la receta de arranque y el contrato que usará el motor | `agents/tester.md`, `skills/probar/SKILL.md` — spec §3.10b y §3.15 |
 | El lado de lectura, corrible a mano antes de lanzar | `scripts/pipeline-read.sh` — spec §3.13b |
@@ -62,6 +62,7 @@ host-orchestrator/
     ├── merge-resolver.md                  # 5 criterios de no-regresión; recomienda
     ├── implementer.md                     # TDD sobre un encargo en prosa, fuera del pipeline
     ├── measurer.md                        # typecheck + suite, solo números
+    ├── operador.md                        # el shell del motor: scout, validator, serializer
     └── tester.md                          # usa la app en un navegador; sin edición
 ```
 
