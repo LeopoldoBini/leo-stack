@@ -70,3 +70,5 @@ yarn.lock
 PROGRESS.md
 state.json
 .state.json
+# el CI del repo consumidor que el veto de workflows nombra (host-orchestrator §3.16)
+.github/workflows/ci.yml

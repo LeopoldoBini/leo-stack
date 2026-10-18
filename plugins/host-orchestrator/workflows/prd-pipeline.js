@@ -58,7 +58,7 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // EL GATE (§3.3): función pura. Acá y solo acá se decide pasa/no-pasa.
 // ---------------------------------------------------------------------------
-function gate(med, base, { exigirTests = true } = {}) {
+function gate(med, base, { exigirTests = true, vedados = [] } = {}) {
   const motivos = []
   if (!med) return { pass: false, motivos: ['validator murió'] }
   if (med.status !== 'ok') return { pass: false, motivos: [`medición inválida: ${med.error ?? 'sin detalle'}`] }
@@ -80,8 +80,80 @@ function gate(med, base, { exigirTests = true } = {}) {
   if (exigirTests) {
     if (med.diff_toca_tests !== true) motivos.push('el diff no agrega ni modifica ningún test (anti "slice sin tests")')
     if (med.tests_del_diff_verdes !== true) motivos.push('tests tocados por el diff no están todos verdes')
+    // Los paths vedados (deny_paths del repo + lo que el token no puede publicar)
+    // se hacen cumplir acá, no solo en el prompt: un diff que los toca no se publica.
+    if (vedados.length) {
+      if (!Array.isArray(med.archivos_del_diff)) motivos.push('el medidor no reportó los archivos del diff: no se puede verificar los paths vedados')
+      else {
+        const tocados = tocaVedados(med.archivos_del_diff, vedados)
+        if (tocados.length) motivos.push(`el diff toca paths vedados: ${tocados.join(', ')} — sacá esos cambios del slice`)
+      }
+    }
   }
   return { pass: motivos.length === 0, motivos }
+}
+
+// Patrón de path vedado → ¿lo toca este archivo? `**` = cualquier cosa, `*` =
+// cualquier cosa menos `/`, sin comodines = ese archivo o esa carpeta entera.
+function tocaVedados(archivos, patrones) {
+  const reglas = patrones.map((p) => {
+    if (!p.includes('*')) {
+      const sinBarra = p.replace(/\/+$/, '')
+      return (f) => f === sinBarra || f.startsWith(`${sinBarra}/`)
+    }
+    const literal = (x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`^${p.split('**').map((s) => s.split('*').map(literal).join('[^/]*')).join('.*')}$`)
+    return (f) => re.test(f)
+  })
+  return archivos.filter((f) => reglas.some((r) => r(f)))
+}
+
+// ¿El token con el que se pushea puede publicar `.github/workflows/**`? (§3.16)
+// GitHub rechaza el push entero si trae un cambio ahí y el token no tiene el scope
+// `workflow` (clásico) o el permiso Workflows (fine-grained). Solo el clásico deja
+// verificarlo: sus scopes vienen en el header X-OAuth-Scopes. Lo que no se puede
+// verificar se veda — un ticket que necesita tocar CI lo hace Leo a mano; dejarlo
+// pasar costó seis implementaciones de #207 (corrida 1017b).
+function vetoDeWorkflows(token) {
+  if (!token) return { vedar: true, motivo: 'el setup no reportó cómo se autentica el push' }
+  if (token.via === 'ssh') return { vedar: false, motivo: 'push por ssh: sin restricción de workflows' }
+  if (token.tipo === 'clasico' && typeof token.scopes === 'string') {
+    return token.scopes.split(/[,\s]+/).includes('workflow')
+      ? { vedar: false, motivo: 'token clásico con scope workflow' }
+      : { vedar: true, motivo: `token clásico sin scope workflow (tiene: ${token.scopes || 'ninguno'})` }
+  }
+  return { vedar: true, motivo: `push ${token.via ?? '?'} con token ${token.tipo ?? 'desconocido'}: el permiso de workflows no se puede verificar` }
+}
+const VETO_WORKFLOWS = '.github/workflows/**'
+
+// Registro de trabajo de la corrida (§3.16). Invariante: un trabajo —implementar
+// la issue N (clave `i<N>`) o mergear el PR M (`pr<M>`)— se intenta UNA vez por
+// corrida, salvo un hecho nuevo. El único hecho nuevo que el motor puede ver es
+// que alguien sacó la etiqueta con la que él mismo lo bloqueó: el scout vuelve a
+// ofrecerlo y el registro dice que su último acto fue bloquearlo. Cualquier otra
+// vuelta (publicación rechazada, implementer muerto, merge fallido sin etiqueta)
+// es el mismo trabajo pidiendo repetirse igual: va para Leo, no se despacha.
+function crearRegistro() {
+  const r = new Map()
+  const entrada = (clave) => r.get(clave) ?? r.set(clave, { intentos: 0, bloqueadoPorMotor: false }).get(clave)
+  return {
+    // 'despachar' | 'para_leo'
+    decidir: (clave) => (!r.has(clave) || r.get(clave).bloqueadoPorMotor ? 'despachar' : 'para_leo'),
+    intento(clave, datos = {}) {
+      const e = entrada(clave)
+      Object.assign(e, datos, { intentos: e.intentos + 1, bloqueadoPorMotor: false })
+    },
+    // Solo después de que la etiqueta quedó puesta: si el serializer falló, la
+    // vuelta del trabajo se lee como lo que es, una repetición sin hecho nuevo.
+    bloqueado(clave, datos = {}) {
+      Object.assign(entrada(clave), datos, { bloqueadoPorMotor: true })
+    },
+    // Datos para el comentario de Leo (worktree, último resultado); no cuenta intento.
+    anotar(clave, datos) {
+      Object.assign(entrada(clave), datos)
+    },
+    dato: (clave) => r.get(clave),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +336,7 @@ const MEDICION_SCHEMA = {
     diff_toca_tests: { type: 'boolean' },
     tests_del_diff: { type: 'array', items: { type: 'string' }, description: 'archivos del diff que matchean testGlobs' },
     tests_del_diff_verdes: { type: 'boolean' },
+    archivos_del_diff: { type: 'array', items: { type: 'string' }, description: 'salida de git diff --name-only del paso del diff, tal cual' },
   },
 }
 
@@ -291,6 +364,20 @@ const SERIALIZER_SCHEMA = {
     status: { type: 'string', enum: ['ok', 'ya_estaba', 'blocked'] },
     pr_number: { type: 'integer' },
     detalle: { type: 'string' },
+  },
+}
+
+// El setup reporta además cómo se autentica el push (pipeline-read.sh push-auth):
+// el motor decide con eso si veda `.github/workflows/**` (§3.16).
+const SETUP_SCHEMA = {
+  ...SERIALIZER_SCHEMA,
+  properties: {
+    ...SERIALIZER_SCHEMA.properties,
+    token: {
+      type: 'object',
+      description: 'el JSON de pipeline-read.sh push-auth, tal cual',
+      properties: { via: { type: 'string' }, tipo: { type: 'string' }, scopes: { type: ['string', 'null'] } },
+    },
   },
 }
 
@@ -432,7 +519,7 @@ function medir(donde, faseTag, etiqueta, { conDiff = false, pull = false } = {})
   const diff = conDiff
     ? `5. Mecánica del diff contra origin/${RAMA} (timeout 120000):
    ${en} git fetch origin && git diff --name-only origin/${RAMA}...HEAD
-   → tests_del_diff = los archivos del diff que matchean ${JSON.stringify(A.testGlobs)}; diff_toca_tests = ¿hay alguno?
+   → archivos_del_diff = esa lista tal cual; tests_del_diff = los que matchean ${JSON.stringify(A.testGlobs)}; diff_toca_tests = ¿hay alguno?
    → ${A.validateHook ? "si tests_fuente='hook': NO los corras, el motor deriva tests_del_diff_verdes de la salida del hook. Si no: " : ''}${en} <runner con SOLO los archivos de test del diff> → tests_del_diff_verdes = ¿todos verdes? (sin tests en el diff → false)`
     : ''
   const pre = pull ? `0. ${en} git fetch origin && git pull --ff-only origin ${RAMA}\n` : ''
@@ -475,13 +562,13 @@ const SERIALIZER_BASE = `Sos el SERIALIZADOR de mutaciones remotas (git-officer)
 PROHIBIDO: usar el tool Monitor, o terminar tu turno "esperando" algo — tu turno termina ÚNICAMENTE con el reporte estructurado emitido. Si esperás checks de CI: SOLO los requeridos por nombre (${JSON.stringify(A.requiredChecks)}; lista vacía = no esperes ninguno), con un loop foreground de Bash (timeout 600000); checks advisory se IGNORAN.
 AUDIT LOG: por cada mutación que EJECUTES (no las constatadas) apendeá una línea a ${AUDIT_LOG}: "$(date -Iseconds) ${A.runLabel} <contexto> <accion> <resultado>" (mkdir -p si hace falta).\n\n`
 
-function serializar(tarea, etiqueta, faseTag) {
+function serializar(tarea, etiqueta, faseTag, schema = SERIALIZER_SCHEMA) {
   return llamar((suf) => SERIALIZER_BASE + tarea + `\n\nDevolvé por schema: status ('ok' | 'ya_estaba' | 'blocked'), pr_number si aplica, detalle (1-2 líneas).${suf}`, {
     label: `serializer:${etiqueta}`,
     phase: faseTag,
     model: M[T.serializer],
     effort: E.serializer,
-    schema: SERIALIZER_SCHEMA,
+    schema,
   })
 }
 
@@ -537,14 +624,22 @@ const setup = await serializar(
 1. cd ${REPO} && git fetch origin
 2. CHECK: ¿existe origin/${RAMA}? → si no: git branch ${RAMA} origin/${BASE} && git push -u origin ${RAMA} (contexto audit: setup)
 3. CHECK: ¿existe el worktree local ${WT_INTEGRACION}? → si no: git worktree add ${WT_INTEGRACION} ${RAMA} (trackeando origin/${RAMA}); si existe: dentro de él git pull --ff-only.
-4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente). ${REGLA_DEPS}`,
+4. Dentro del worktree: instalá dependencias si el repo lo necesita (lockfile presente y node_modules ausente). ${REGLA_DEPS}
+5. cd ${WT_INTEGRACION} && sh ${READ_CLI} push-auth   → imprime un JSON de una línea (cómo se autentica el push a origin; nunca imprime el token): copialo TAL CUAL en el campo token.`,
   'setup-rama',
-  'Setup'
+  'Setup',
+  SETUP_SCHEMA
 )
 if (!setup || setup.status === 'blocked') {
   log(`✖ setup falló: ${setup?.detalle ?? 'serializer murió'} — ABORT`)
   return { status: 'ABORT', fase: 'setup', detalle: setup?.detalle ?? 'serializer murió' }
 }
+
+// §3.16 — lo que el token no puede publicar se veda de entrada (prompt + gate).
+const vetoPush = vetoDeWorkflows(setup.token)
+const VEDADOS = vetoPush.vedar ? [...new Set([...A.denyPaths, VETO_WORKFLOWS])] : A.denyPaths
+log(`push: ${vetoPush.motivo}${vetoPush.vedar ? ` → ${VETO_WORKFLOWS} vedado` : ''}`)
+const registro = crearRegistro()
 
 // ===========================================================================
 // LOOP DE WAVES
@@ -674,16 +769,27 @@ ${refresh.detalle}`,
   const waveResumen = { wave, merges: [], impl: [] }
 
   // --- Merge wave: SERIAL por PR MERGE_READY (validar → resolver → merge) ---
+  // §3.16: cada PR se intenta una vez por corrida. Si vuelve MERGE_READY sin un
+  // hecho nuevo (un merge que falló sin etiqueta, un serializer que murió), se
+  // marca merge-blocked para Leo en vez de repetir el mismo intento cada wave.
   for (const iss of buckets.MERGE_READY ?? []) {
     const prNum = iss.pr_number
+    const wtPr = `${REPO}/.host-orchestrator/wt/pr-${prNum}`
+    const clavePr = `pr${prNum}`
+    if (registro.decidir(clavePr) === 'para_leo') {
+      await marcarPr(prNum, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clavePr).ultimo})`, FASE, { conservar: wtPr })
+      waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: 'repetición sin hecho nuevo' })
+      continue
+    }
+    registro.intento(clavePr, { ultimo: 'merge empezado y no terminado' })
     const prep = await serializar(
       `Preparar el PR #${prNum} (issue #${iss.number}) para merge a ${RAMA}:
 1. cd ${REPO} && git fetch origin
 2. CHECK: gh pr view ${prNum} --json state,mergedAt → si ya está mergeado: 'ya_estaba' y TERMINÁ.
-3. Worktree efímero en ${REPO}/.host-orchestrator/wt/pr-${prNum} — CONTRATO: el worktree DEBE quedar EXACTAMENTE en ese path (el validator mide ahí; otro path = medición inválida = merge bloqueado).
+3. Worktree efímero en ${wtPr} — CONTRATO: el worktree DEBE quedar EXACTAMENTE en ese path (el validator mide ahí; otro path = medición inválida = merge bloqueado).
    a. Si ya existe: reusalo con git pull.
    b. Si la branch ${iss.pr_branch} está checkouteada en OTRO worktree (git worktree list — típico leftover de un implementer): si ese worktree está limpio (git status --porcelain vacío) y su HEAD está contenido en origin/${iss.pr_branch}, removelo (git worktree remove --force + git worktree prune) y seguí; si tiene commits sin pushear o cambios sin commitear, NO lo toques → status 'blocked' con el detalle.
-   c. git worktree add ${REPO}/.host-orchestrator/wt/pr-${prNum} ${iss.pr_branch}
+   c. git worktree add ${wtPr} ${iss.pr_branch}
 4. Dentro: git merge origin/${RAMA} — CON conflicto: NO resuelvas, abortá el merge y status 'blocked' con los archivos. Sin conflicto: si hubo merge nuevo, push de la branch del PR (contexto audit: pr-${prNum}-update). Instalá deps si hace falta. ${REGLA_DEPS}
 En detalle reportá el path del worktree.`,
       `prep-pr${prNum}`,
@@ -693,10 +799,8 @@ En detalle reportá el path del worktree.`,
       waveResumen.merges.push({ pr: prNum, resultado: 'ya_estaba' })
       continue
     }
-    const wtPr = `${REPO}/.host-orchestrator/wt/pr-${prNum}`
-    let conflicto = prep?.status === 'blocked'
 
-    if (conflicto) {
+    if (prep?.status === 'blocked') {
       const v = await resolver(
         `## Workspace
 Worktree: ${wtPr} (branch ${iss.pr_branch}). Tarea: mergear origin/${RAMA} en la branch del PR #${prNum} — corré el merge y resolvé conflictos EN LOS ARCHIVOS, commiteados localmente.
@@ -713,19 +817,8 @@ ${prep?.detalle ?? 'sin detalle'}`,
         `pr${prNum}`,
         FASE
       )
-      const bloquear = async (motivo, { conservarWorktree = false } = {}) =>
-        serializar(
-          `El merge del PR #${prNum} quedó bloqueado (${motivo}). Aplicá: gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})" (contexto audit: pr-${prNum}-blocked). ${
-            conservarWorktree
-              ? `CONSERVÁ el worktree ${wtPr}: tiene trabajo commiteado que no está en ningún otro lado.`
-              : `Limpiá el worktree ${wtPr} (git worktree remove --force).`
-          }`,
-          `block-pr${prNum}`,
-          FASE
-        )
       if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
-        const motivo = `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`
-        await bloquear(motivo)
+        await marcarPr(prNum, `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`, FASE)
         waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: v?.resumen })
         continue
       }
@@ -739,21 +832,16 @@ ${prep?.detalle ?? 'sin detalle'}`,
         FASE
       )
       if (pushPr?.status === 'blocked') {
-        await bloquear(`resolución sin publicar: ${pushPr.detalle ?? 'push fallido'}`, { conservarWorktree: true })
+        await marcarPr(prNum, `resolución sin publicar: ${pushPr.detalle ?? 'push fallido'}`, FASE, { conservar: wtPr })
         waveResumen.merges.push({ pr: prNum, resultado: 'merge-blocked', motivo: pushPr.detalle })
         continue
       }
-      conflicto = false
     }
 
     const medPr = await medir(wtPr, FASE, `pr${prNum}`, {})
     const g = gate(medPr, baseMetrics, { exigirTests: false }) // el PR ya pasó su gate al publicarse; acá exigimos no-regresión post-merge-de-rama
     if (!g.pass) {
-      await serializar(
-        `El PR #${prNum} NO pasa el gate de no-regresión contra ${RAMA} (${g.motivos.join(' | ')}). Aplicá: gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "gate: ${g.motivos.join('; ')} (pipeline ${A.runLabel})" (contexto audit: pr-${prNum}-gate-fail). Conservá el worktree ${wtPr} para autopsia.`,
-        `gatefail-pr${prNum}`,
-        FASE
-      )
+      await marcarPr(prNum, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, FASE, { conservar: wtPr })
       waveResumen.merges.push({ pr: prNum, resultado: 'gate-fail', motivo: g.motivos })
       continue
     }
@@ -766,15 +854,28 @@ ${prep?.detalle ?? 'sin detalle'}`,
       `merge-pr${prNum}`,
       FASE
     )
-    waveResumen.merges.push({ pr: prNum, resultado: mrg?.status ?? 'blocked', motivo: mrg?.detalle })
     log(`merge PR #${prNum}: ${mrg?.status ?? 'serializer murió'}`)
+    if (mrg?.status === 'blocked') await marcarPr(prNum, `el merge no se completó: ${mrg.detalle}`, FASE)
+    else if (mrg) registro.anotar(clavePr, { ultimo: `merge ${mrg.status}` })
+    waveResumen.merges.push({ pr: prNum, resultado: mrg?.status ?? 'serializer murió', motivo: mrg?.detalle })
   }
 
   // --- Impl wave: fan-out implementers en worktrees (cap maxParallel) -------
-  const implementables = (buckets.IMPLEMENTABLE ?? []).slice(0, A.maxParallel)
+  // §3.16: lo que el scout ofrece y ya se intentó en esta corrida sin un hecho
+  // nuevo no se despacha: se marca para Leo, con su worktree conservado. El
+  // reparto se decide ANTES de marcar: marcar deja la entrada como "bloqueada
+  // por el motor", que es justo lo que habilita un re-despacho si Leo la destraba.
+  const ofrecidas = buckets.IMPLEMENTABLE ?? []
+  const vuelven = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'para_leo')
+  const implementables = ofrecidas.filter((i) => registro.decidir(`i${i.number}`) === 'despachar').slice(0, A.maxParallel)
+  for (const iss of vuelven) {
+    const d = registro.dato(`i${iss.number}`)
+    await marcarIssue(iss.number, `volvió a IMPLEMENTABLE en la misma corrida sin un hecho nuevo (último resultado: ${d.ultimo})`, FASE, d.worktree)
+  }
   if (implementables.length > 0) {
     log(`▶ impl w${wave}: ${implementables.map((i) => `#${i.number}`).join(' ')}`)
-    const deny = A.denyPaths.length ? `\nPATHS VEDADOS (ratchets/guards ortogonales del repo — NO los toques ni "mejores" nada ahí): ${A.denyPaths.join(', ')}` : ''
+    for (const iss of implementables) registro.intento(`i${iss.number}`, { ultimo: 'el implementer no devolvió resultado' })
+    const deny = VEDADOS.length ? `\nPATHS VEDADOS (ratchets/guards del repo y lo que el token de push no puede publicar — NO los toques ni "mejores" nada ahí; el gate rechaza un diff que los toque): ${VEDADOS.join(', ')}` : ''
 
     const implResultados = (
       await parallel(
@@ -786,39 +887,80 @@ ${prep?.detalle ?? 'sin detalle'}`,
     for (const r of implResultados) {
       waveResumen.impl.push({ issue: r.issue, gate: r.gate, motivos: r.motivos })
       bugsReales.push(...(r.impl?.bugs_reales ?? []).map((b) => `[#${r.issue}] ${b}`))
+      if (r.impl?.worktree) registro.anotar(`i${r.issue}`, { worktree: r.impl.worktree })
       if (r.gate !== 'PASS') {
-        if (r.gate === 'FAIL') {
-          await serializar(
-            `La issue #${r.issue} falló su gate 2 veces (${(r.motivos ?? []).join(' | ')}). Aplicá: gh issue edit ${r.issue} --add-label agent-blocked && gh issue comment ${r.issue} --body "gate del pipeline ${A.runLabel}: ${(r.motivos ?? []).join('; ')}. Worktree conservado: ${r.impl?.worktree}" (contexto audit: issue-${r.issue}-blocked).`,
-            `block-i${r.issue}`,
-            FASE
-          )
-          bloqueadas.push(`#${r.issue} gate FAIL: ${(r.motivos ?? []).join('; ')}`)
-        }
+        if (r.gate === 'FAIL') await marcarIssue(r.issue, `gate FAIL tras el reintento: ${(r.motivos ?? []).join('; ')}`, FASE, r.impl?.worktree)
+        else registro.anotar(`i${r.issue}`, { ultimo: (r.motivos ?? []).join('; ') })
         continue
       }
-      const pub = await serializar(
-        `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
+      const publicar = (intento, extra = '') =>
+        serializar(
+          `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 3.
 2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, ${
-        (r.impl.recursos_verificados ?? []).length
-          ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
-          : ''
-      }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
-3. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree canónico del merge posterior. Solo conservalo si el push o el PR fallaron.`,
-        `publish-i${r.issue}`,
-        FASE
-      )
-      log(`publish #${r.issue}: ${pub?.status ?? 'blocked'} ${pub?.pr_number ? `→ PR #${pub.pr_number}` : ''}`)
+            (r.impl.recursos_verificados ?? []).length
+              ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
+              : ''
+          }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
+3. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree canónico del merge posterior. Solo conservalo si el push o el PR fallaron.
+Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle.${extra}`,
+          intento === 1 ? `publish-i${r.issue}` : `publish-i${r.issue}~p${intento}`,
+          FASE
+        )
+      let pub = await publicar(1)
+      // §3.16 — a lo sumo UN reintento, y de la publicación sola: el trabajo ya
+      // está hecho y medido. Lo que rechaza el remoto dos veces no lo arregla
+      // reimplementar (en 1017b el mismo rechazo costó seis implementaciones).
+      if (pub?.status === 'blocked') {
+        log(`publish #${r.issue}: blocked (${pub.detalle}) → reintento de solo la publicación`)
+        pub = await publicar(2, `\n\nINTENTO 2 de la publicación: el anterior terminó 'blocked' (${pub.detalle}). El trabajo ya está commiteado en el worktree: no se reimplementa nada. Verificá qué quedó hecho (push, PR) antes de cada paso y completá solo lo que falta.`)
+      }
+      log(`publish #${r.issue}: ${pub?.status ?? 'serializer murió'} ${pub?.pr_number ? `→ PR #${pub.pr_number}` : ''}`)
+      if (pub?.status === 'blocked') {
+        await marcarIssue(r.issue, `publicación bloqueada dos veces: ${pub.detalle}`, FASE, r.impl.worktree)
+        continue
+      }
+      registro.anotar(`i${r.issue}`, { ultimo: pub ? `publicado (${pub.status})` : 'la publicación no devolvió resultado' })
       // El PR por-issue va contra la rama integradora (no la default) → su "Closes #" es inerte.
       // Anotamos la issue para inyectar el autocierre real en el PR final (integradora → default).
-      if (pub && pub.status !== 'blocked' && (pub.pr_number || pub.status)) cerradas.push(r.issue)
+      if (pub && (pub.pr_number || pub.status)) cerradas.push(r.issue)
     }
   }
 
   wavesReporte.push(waveResumen)
   if (wave === A.maxWaves) wavesAgotadas = true
   log(`✔ wave ${wave} cerrada: ${waveResumen.merges.length} merges procesados, ${waveResumen.impl.length} impls — spent ${Math.round(budget.spent() / 1000)}k`)
+}
+
+// --- Marcar para Leo (§3.16): etiqueta + comentario + lista de bloqueadas -----
+// El registro queda "bloqueado por el motor" solo si la etiqueta se puso: así,
+// si después alguien la saca, la vuelta del trabajo es un hecho nuevo.
+async function marcarIssue(n, motivo, FASE, worktree) {
+  const r = await serializar(
+    `La issue #${n} queda para Leo: ${motivo}.
+1. CHECK: si la issue ya tiene la etiqueta agent-blocked y un comentario de la corrida ${A.runLabel} con este motivo: 'ya_estaba' y TERMINÁ.
+2. gh issue edit ${n} --add-label agent-blocked && gh issue comment ${n} --body "pipeline ${A.runLabel}: ${motivo}.${worktree ? ` Worktree conservado: ${worktree}` : ''}" (contexto audit: issue-${n}-blocked).${
+      worktree ? `\n3. CONSERVÁ el worktree ${worktree}: tiene el trabajo commiteado y no está en ningún otro lado. No lo limpies.` : ''
+    }`,
+    `block-i${n}`,
+    FASE
+  )
+  if (r && r.status !== 'blocked') registro.bloqueado(`i${n}`, { ultimo: motivo })
+  bloqueadas.push(`#${n} ${motivo}${worktree ? ` (worktree: ${worktree})` : ''}`)
+  return r
+}
+
+async function marcarPr(prNum, motivo, FASE, { conservar = null } = {}) {
+  const r = await serializar(
+    `El PR #${prNum} queda para Leo: ${motivo}.
+1. CHECK: gh pr view ${prNum} --json state,mergedAt,labels → si ya está mergeado: 'ya_estaba' y TERMINÁ (no etiquetes ni comentes).
+2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
+3. ${conservar ? `CONSERVÁ el worktree ${conservar}: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${REPO}/.host-orchestrator/wt/pr-${prNum}, limpialo (git worktree remove --force + git worktree prune).`}`,
+    `block-pr${prNum}`,
+    FASE
+  )
+  if (r && r.status !== 'blocked') registro.bloqueado(`pr${prNum}`, { ultimo: motivo })
+  return r
 }
 
 // --- implementer + gate por issue (cadena secuencial; corre en paralelo entre issues)
@@ -868,7 +1010,7 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
   if (impl.bloqueado) return { issue: iss.number, gate: 'FAIL', motivos: [`ticket: ${impl.bloqueado}`], impl }
 
   let med = await medir(impl.worktree, FASE, `i${iss.number}`, { conDiff: true })
-  let g = gate(med, baseMetrics)
+  let g = gate(med, baseMetrics, { vedados: VEDADOS })
   if (!g.pass) {
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
     await llamar(
@@ -879,7 +1021,7 @@ Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, 
       { label: `retry:#${iss.number}`, phase: FASE, model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
     )
     med = await medir(impl.worktree, FASE, `i${iss.number}-retry`, { conDiff: true })
-    g = gate(med, baseMetrics)
+    g = gate(med, baseMetrics, { vedados: VEDADOS })
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
   return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl }

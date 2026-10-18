@@ -210,7 +210,7 @@ El applier aplica los fixes del juez en tandas de `applier_chunk` (default 4). L
   "model_map": { "T0": "opus", "T1": "opus", "T2": "sonnet", "T3": "haiku" },  // ÚNICO lugar nominal a modelos
   "role_tiers": {},                     // override por rol, p.ej. {"implementer": "T2"} para repos triviales
   "labels": { "ready": "ready-for-agent", "agent_pr": "afk-agent-pr" },
-  "deny_paths": []                      // rutas VEDADAS a los agentes: ratchets/guards ortogonales del repo
+  "deny_paths": []                      // rutas VEDADAS a los agentes: ratchets/guards ortogonales del repo (prompt + gate, §3.16)
 }
 scripts/wave-validate.sh            (existente; NUEVO modo --json, ver §3.3)
 ```
@@ -277,6 +277,7 @@ POSIX sh usando solo `gh` (su `--jq` incorporado evita el jq externo). Tres subc
 | `scope <tipo:valor> --rama <r>` | el JSON del `SCOUT_SCHEMA` ya bucketeado | T0 en el pre-flight; el transporte por wave |
 | `check <tipo:valor>` | precondiciones, con los `gh api` exactos del remedio | T0, antes de crear ninguna rama |
 | `intent <issue>` | spec padre (`out_of_scope` + `testing_decisions`), índice de ADRs, rama de prototipo | implementer de entrada; merge-resolver bajo disparador |
+| `push-auth` | cómo se autentica el push a `origin` (`via`, `tipo` de token, `scopes` si es clásico); nunca imprime el token | el serializer del Setup (§3.16) |
 
 **Por qué un script y no JS del motor:** una sola implementación de la tabla de bucketing (en los dos, divergen sin que nadie se entere), **testeable** con fixtures (`scripts/test-pipeline-read.sh`) e **inspeccionable** — se corre y se ve qué va a hacer el pipeline *antes* de lanzarlo; hoy eso era invisible hasta que el scout reportaba.
 
@@ -346,6 +347,20 @@ No hay veredicto global a propósito: «anda» no es un estado. Uso del motor: c
 | #184 aviso del Pin | `960a8c0` (antes del fix) | no-pude-probar — el mapa no carga en el puerto de la receta | sí: no inventó |
 
 En la primera pasada sobre el commit roto, sin regla de precondiciones, también eligió `no-pude-probar` antes que fabricar estado: ese es el sesgo que se quiere. El commit roto de #129 tenía un test de «Armar de cero» que pasaba con el bug adentro. Cada corrida tardó de 80 a 140 s (arranque de la app: 12–17 s) y costó USD 0,24–0,37 en el tester. Escalar a T1 queda para cuando aparezca un `visto-andar` falso; cuatro corridas son poca muestra, y la decisión se revisa con la primera corrida del motor.
+
+### 3.16 Un trabajo, un intento por corrida (4.15.0, corrida `1017b`)
+
+**Invariante:** un trabajo —implementar la issue N, mergear el PR M— se intenta **una vez por corrida**, salvo un hecho nuevo. Lo lleva un registro en memoria del motor (`crearRegistro`, núcleo puro): cuando el scout vuelve a ofrecer algo ya intentado, el motor no lo despacha; lo marca para Leo —etiqueta `agent-blocked` (issue) o `merge-blocked` (PR), comentario con el motivo y el último resultado, línea en `bloqueadas`— y **conserva su worktree**, que se nombra en el comentario.
+
+**Hecho nuevo** es lo único que el motor puede ver desde adentro: que alguien sacó la etiqueta que él mismo puso. El registro marca "bloqueado por el motor" solo cuando el serializer confirmó la etiqueta; si el scout después lo ofrece de nuevo, es porque un humano lo destrabó, y se despacha otra vez. Cualquier otra vuelta —publicación rechazada, implementer muerto, merge fallido sin etiqueta— es el mismo intento pidiendo repetirse igual.
+
+**Publicación:** a lo sumo **un reintento de la publicación sola** en la misma wave (el trabajo ya está hecho y medido); si el remoto rechaza dos veces, la issue se marca en el acto, así que un relanzamiento tampoco la reimplementa. Origen: en `1017b` el push de #207 fallaba siempre igual (token sin scope `workflow`, el diff tocaba `.github/workflows/ci.yml`); sin PR, el scout la seguía viendo `IMPLEMENTABLE` y se implementó **seis veces**, ~52 USD de referencia.
+
+**Veto de workflows desde el Setup:** el serializer del Setup corre `pipeline-read.sh push-auth` sobre la credencial que va a usar `git push` (no la de `gh`: pueden diferir). El motor decide en JS (`vetoDeWorkflows`): push por ssh o token clásico con scope `workflow` → libre; clásico sin el scope → `.github/workflows/**` vedado; fine-grained, app o sin credencial → **vedado por no verificable** (solo el clásico expone sus scopes). Un ticket que necesita tocar CI lo hace Leo a mano.
+
+**Los paths vedados se hacen cumplir en el gate**, no solo en el prompt: el validator reporta `archivos_del_diff` y el gate de la issue falla si alguno matchea `deny_paths` o el veto (`tocaVedados`: `**`, `*`, o una carpeta sin comodín). Sin la lista de archivos, el gate no puede afirmar que no los toca y no pasa.
+
+Tests: `tests/motor.test.mjs` corre el motor contra un mundo simulado donde la publicación de una issue falla siempre, el implementer muere, el merge falla o alguien saca la etiqueta; `scripts/test-pipeline-read.sh` cubre `push-auth` con fixtures.
 
 ## 4. Migración v3 → v4
 

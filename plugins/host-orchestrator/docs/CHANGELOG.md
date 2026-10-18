@@ -2,6 +2,14 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.15.0 (2026-10-18)
+
+Arreglos de la auditoría de cuatro corridas reales sobre Radar (17–18 oct, devbox). El motor sigue en waves; el despacho continuo y la revisión de un solo agente van aparte, en 4.16.0, para poder revertirlos por separado.
+
+**Un trabajo, un intento por corrida** (spec §3.16). En `1017b` el push de #207 fallaba siempre igual —token sin scope `workflow`, el diff tocaba `.github/workflows/ci.yml`— y la issue se implementó seis veces: sin PR, el scout la seguía viendo `IMPLEMENTABLE`. Ahora el motor lleva un registro de lo que intentó: lo que vuelve sin un hecho nuevo se marca para Leo (etiqueta, comentario, `bloqueadas`) con su worktree conservado, en vez de repetirse. El único hecho nuevo que el motor ve es que alguien sacó la etiqueta que él puso. Vale para issues y para PRs (un merge que falla ya no se reintenta en cada wave). La publicación tiene a lo sumo un reintento de la publicación sola; si el remoto rechaza dos veces, la issue se marca en el acto. El Setup corre `pipeline-read.sh push-auth` y, si el token no puede publicar workflows o no se puede verificar (fine-grained, app), veda `.github/workflows/**`. Los paths vedados —ese veto y `deny_paths`— ahora los hace cumplir el gate, no solo el prompt.
+
+**El motor tiene tests.** `tests/simulador.mjs` corre `prd-pipeline.js` tal cual contra un GitHub y un git de mentira, con agentes falsos por label; las reglas puras viven en un bloque marcado que el test evalúa solo. `node --test 'plugins/host-orchestrator/tests/*.test.mjs'`.
+
 ## 4.14.1 (2026-10-15)
 
 **El glosario de dominio se llama `GLOSSARY.md`** (convención de mattpocock-skills 1.3). Implementadores, particionador y reviewers leen `GLOSSARY.md` y caen a `CONTEXT.md` en repos que todavía no migraron.

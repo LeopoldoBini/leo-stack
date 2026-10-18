@@ -5,6 +5,7 @@
 #   uso: pipeline-read.sh scope  <tipo:valor> --rama <rama> [opciones]
 #        pipeline-read.sh check  <tipo:valor> [opciones]
 #        pipeline-read.sh intent <n> [opciones]
+#        pipeline-read.sh push-auth [--dir <checkout>]
 #
 # POSIX sh usando SOLO `gh` — su `--jq` incorporado evita la dependencia de un jq
 # externo, y `gh auth status` ya era precondición dura del pipeline.
@@ -49,7 +50,7 @@ muere() { printf 'pipeline-read: %s\n' "$1" >&2; exit "${2:-2}"; }
 SUB="$1"; shift
 case "$SUB" in
   -h|--help) uso 0 ;;
-  scope|check|intent) ;;
+  scope|check|intent|push-auth) ;;
   *) muere "subcomando desconocido: $SUB (probá -h)" ;;
 esac
 
@@ -69,7 +70,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$ARG" ] || muere "$SUB necesita un argumento (probá -h)"
+[ "$SUB" = push-auth ] || [ -n "$ARG" ] || muere "$SUB necesita un argumento (probá -h)"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -105,6 +106,66 @@ consulta() {
   [ -n "$salida" ] && printf '%s\n' "$salida"
   return 0
 }
+
+# ------------------------------------------------------------ push-auth --
+
+# push-auth — cómo se autentica el push a origin, sin imprimir nunca el token
+# (spec §3.16). Una línea JSON:
+#   {"via": ssh|https|desconocido,
+#    "tipo": clasico|fine-grained|app|sin-credencial|no-aplica,
+#    "scopes": "<header X-OAuth-Scopes>" | null}
+# GitHub rechaza el push entero si trae un cambio en .github/workflows/ y el
+# token no puede publicarlo. Solo el token clásico expone sus scopes; para los
+# demás el motor no puede verificarlo y veda esa carpeta. La credencial es la
+# del mismo ayudante que va a usar `git push`, no la de `gh`: pueden diferir.
+# No toca la API de GitHub más que con un GET, y solo con token clásico.
+cmd_push_auth() {
+  if [ -n "${HO_FIXTURE_DIR:-}" ]; then
+    url="$(cat "$HO_FIXTURE_DIR/push-url" 2>/dev/null)"
+  else
+    url="$(git -C "$DIR" remote get-url --push origin 2>/dev/null)"
+  fi
+  case "$url" in
+    git@*|ssh://*) via=ssh ;;
+    https://*)     via=https ;;
+    *)             via=desconocido ;;
+  esac
+  if [ "$via" != https ]; then
+    printf '{"via": "%s", "tipo": "no-aplica", "scopes": null}\n' "$via"
+    return 0
+  fi
+  if [ -n "${HO_FIXTURE_DIR:-}" ]; then
+    token="$(cat "$HO_FIXTURE_DIR/push-token" 2>/dev/null)"
+  else
+    # Sin terminal ni askpass: sin credencial guardada, falla en vez de preguntar.
+    token="$(printf 'url=%s\n\n' "$url" \
+             | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false git -C "$DIR" credential fill 2>/dev/null \
+             | sed -n 's/^password=//p')"
+  fi
+  case "$token" in
+    '')           tipo=sin-credencial ;;
+    github_pat_*) tipo=fine-grained ;;
+    ghs_*)        tipo=app ;;
+    *)            tipo=clasico ;;
+  esac
+  scopes=null
+  if [ "$tipo" = clasico ]; then
+    if [ -n "${HO_FIXTURE_DIR:-}" ]; then
+      s="$(cat "$HO_FIXTURE_DIR/push-scopes" 2>/dev/null)"
+    else
+      host="$(printf '%s' "$url" | sed -E 's#^https://([^@/]*@)?([^/:]+).*#\2#')"
+      s="$(GH_TOKEN="$token" GH_HOST="$host" gh api -i --method GET rate_limit </dev/null 2>/dev/null \
+           | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa][Uu][Tt][Hh]-[Ss][Cc][Oo][Pp][Ee][Ss]: *//p' | head -1)"
+    fi
+    scopes="\"$(printf '%s' "$s" | sed 's/\\/\\\\/g; s/"/\\"/g')\""
+  fi
+  printf '{"via": "%s", "tipo": "%s", "scopes": %s}\n' "$via" "$tipo" "$scopes"
+}
+
+if [ "$SUB" = push-auth ]; then
+  cmd_push_auth
+  exit 0
+fi
 
 if [ -z "$SLUG" ]; then
   if [ -n "${HO_FIXTURE_DIR:-}" ]; then

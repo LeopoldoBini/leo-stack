@@ -139,6 +139,25 @@ espera '"path": "docs/adr/0007-pasarela.md"'   'indexa los ADRs por título y pa
 espera '"prototype_branch": "prototype/checkout-fsm"' 'levanta el puntero al prototipo'
 no_espera 'Stripe como PSP'                    'no arrastra secciones que nadie pidió'
 
+# ------------------------------------- push-auth: qué puede publicar el push --
+# El motor veda .github/workflows/** salvo que esta salida diga que se puede
+# (spec §3.16). Lo que se prueba es la clasificación; el token nunca se imprime.
+
+push_auth() { HO_FIXTURE_DIR="$FIX/$1" sh "$CLI" push-auth > "$SALIDA" 2>&1 || fallo "push-auth $1 no salió 0"; }
+
+printf '\npush-auth: cómo se autentica el push\n'
+push_auth push-ssh
+espera '{"via": "ssh", "tipo": "no-aplica", "scopes": null}'                    'ssh: no hay scopes que mirar'
+push_auth push-clasico
+espera '{"via": "https", "tipo": "clasico", "scopes": "gist, read:org, repo, workflow"}' 'token clásico: trae sus scopes'
+no_espera 'gho_falso'                                                            'el token no aparece en la salida'
+push_auth push-sin-workflow
+espera '"scopes": "gist, read:org, repo"}'                                       'clásico sin workflow: lo dice tal cual'
+push_auth push-fino
+espera '{"via": "https", "tipo": "fine-grained", "scopes": null}'               'fine-grained: scopes no verificables'
+push_auth push-sin-credencial
+espera '"tipo": "sin-credencial"'                                                'sin credencial: no pregunta, lo reporta'
+
 printf '\n──────────\n'
 if [ "$FALLOS" -eq 0 ]; then
   printf 'test-pipeline-read: todo en verde.\n'; exit 0
