@@ -2,6 +2,10 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.16.2 (2026-10-18)
+
+**Al marcar una issue y al publicar un PR, el shell ya no interpreta texto de un modelo** (spec §3.2). Lo que 4.16.1 hizo con la marca de un PR, ahora también en el comentario de una issue bloqueada y en la publicación de un PR: el motor arma el comando entero, con el título y el motivo entre comillas simples escapadas y el cuerpo por archivo (`--body-file`, una línea por argumento de `printf`, sin heredoc). Antes iban entre comillas dobles: el rechazo de GitHub por el scope `workflow`, que trae backticks, se ejecutaba en la devbox al comentar la issue, y lo mismo un resumen del implementer o un título de issue con `` `código` `` o `$(`. El cuerpo del PR de una issue (`Closes`, resumen, recursos verificados, pie) y el de los arreglos de una revisión ahora los arma el motor y no el serializer. Se nota en los PRs: ahora llevan el resumen real del implementer (antes el serializer no lo recibía y lo redactaba él). Los tests corren en bash y zsh los comandos que el motor manda de verdad, sacados del prompt, con textos que traen backticks y `$(touch …)`. **Queda pendiente el PR final:** su cuerpo lo compone el serializer con datos de `gh` y con los títulos de las sugerencias de seguimiento que escribió el revisor, así que tiene el mismo riesgo, una vez por corrida.
+
 ## 4.16.1 (2026-10-18)
 
 Dos arreglos medidos en la corrida `registro-1018` (Radar, devbox). Ninguna otra conducta del motor cambia.

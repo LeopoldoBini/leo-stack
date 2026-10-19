@@ -1,8 +1,12 @@
-// Tests de los dos comandos de shell que deciden sobre un PR en el remoto:
+// Tests de los comandos de shell con los que el motor muta el remoto:
 //
-//   scripts/mergear-pr.sh       el merge de un PR aprobado, con su reintento
-//   comandoDeMarcarPr (motor)   la etiqueta merge-blocked, nunca sobre un PR MERGED
+//   scripts/mergear-pr.sh         el merge de un PR aprobado, con su reintento
+//   comandoDeMarcarPr (motor)     la etiqueta merge-blocked, nunca sobre un PR MERGED
+//   comandoDeMarcarIssue (motor)  la etiqueta agent-blocked con su motivo
+//   comandoDePublicarPr (motor)   push + PR con título y cuerpo escritos por modelos
 //
+// Todo texto que escribió un modelo o una persona llega al remoto tal cual: el shell
+// no ejecuta backticks ni `$(` (eso lo prueban los textos con `touch pwned`).
 // Se corren de verdad, con bash (y zsh, el shell del Bash tool en la Mac), contra un
 // `git`, un `gh` y un `sleep` falsos en el PATH que anotan cada llamada.
 
@@ -13,7 +17,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { nucleoPuro } from './simulador.mjs'
+import { nucleoPuro, correrMotor, crearMundo, conLabel } from './simulador.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/mergear-pr.sh', import.meta.url))
 const H = 'a'.repeat(40) // el commit medido, HEAD del worktree
@@ -36,6 +40,17 @@ case "$1 $2" in
   "pr view") [ -f "$D/estado" ] && cat "$D/estado" || exit 1 ;;
   "pr edit") exit 0 ;;
   "pr comment") printf '%s' "$5" > "$D/cuerpo"; exit 0 ;;
+  "issue edit") exit 0 ;;
+  "issue comment") printf '%s' "$5" > "$D/cuerpo-issue"; exit 0 ;;
+  "pr create")
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$D/titulo"; shift ;;
+        --body-file) cat "$2" > "$D/cuerpo-pr"; shift ;;
+      esac
+      shift
+    done ;;
 esac
 `
 const GIT = `#!/usr/bin/env bash
@@ -143,7 +158,11 @@ test('mergear-pr: si el push falla, no se mergea', () => {
 
 // ── La marca merge-blocked ──
 
-const { comandoDeMarcarPr } = nucleoPuro(['comandoDeMarcarPr'])
+const { comandoDeMarcarPr, comandoDeMarcarIssue, comandoDePublicarPr } = nucleoPuro(['comandoDeMarcarPr', 'comandoDeMarcarIssue', 'comandoDePublicarPr'])
+// Un texto como los que escriben los modelos: backticks, `$(`, comillas de los dos tipos.
+const PELIGROSO = "arreglé `touch pwned1` y $(touch pwned2) en it's \"citado\" — ${HOME}"
+// Cada comando hace `cd` antes: un `touch` ejecutado caería en el escenario, el repo o el worktree.
+const sinEjecutar = (e) => [e.d, e.repo, e.wt].every((dir) => ['pwned1', 'pwned2', 'pwned3'].every((f) => !existsSync(join(dir, f))))
 const shells = ['bash', 'zsh'].filter((s) => spawnSync(s, ['-c', 'true']).status === 0)
 const marcar = (e, sh, comentario = 'integración bloqueada (pipeline sim-1018)') => {
   const salida = execFileSync(sh, ['-c', comandoDeMarcarPr({ repo: e.repo, pr: 500, comentario })], { env: e.env, encoding: 'utf8', cwd: e.d }).trim()
@@ -175,4 +194,88 @@ for (const sh of shells) {
     assert.equal(r.salida, 'ESTADO_ILEGIBLE')
     assert.deepEqual(r.etiquetas, [])
   })
+
+  test(`marcar issue (${sh}): el motivo llega tal cual, sin que el shell ejecute nada`, () => {
+    const e = escenario()
+    const comentario = `pipeline sim-1018: publicación bloqueada: ${PELIGROSO}\notra línea.`
+    execFileSync(sh, ['-c', comandoDeMarcarIssue({ repo: e.repo, issue: 207, comentario })], { env: e.env, cwd: e.d })
+    assert.ok(e.llamadas().some((l) => l === 'gh issue edit 207 --add-label agent-blocked'))
+    assert.equal(readFileSync(join(e.d, 'cuerpo-issue'), 'utf8'), comentario.replace('\n', ' '))
+    assert.ok(sinEjecutar(e))
+  })
+
+  test(`publicar PR (${sh}): título y cuerpo de modelo llegan tal cual, sin que el shell ejecute nada`, () => {
+    const e = escenario()
+    const titulo = `feat: ${PELIGROSO} $(touch pwned3)`
+    const cuerpo = `Closes #12\n\n${PELIGROSO}\n\n## Recursos verificados\n- tabla \`x\` — $(touch pwned3), 2026-10-18\n\nPR del pipeline sim. 🤖`
+    execFileSync(sh, ['-c', comandoDePublicarPr({ worktree: e.wt, branch: 'review/sim-pr5', base: 'batch/sim', labels: ['afk-agent-pr', 'review-fix'], titulo, cuerpo, conHead: true })], { env: e.env, cwd: e.d })
+    const ll = e.llamadas()
+    assert.ok(ll.includes('git push -u origin review/sim-pr5'))
+    assert.match(ll.find((l) => l.startsWith('gh pr create')), /^gh pr create --base batch\/sim --head review\/sim-pr5 --label afk-agent-pr --label review-fix --title /)
+    assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), titulo)
+    assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `${cuerpo}\n`)
+    assert.ok(sinEjecutar(e))
+  })
 }
+
+// ── Los comandos que el motor manda de verdad, sacados del prompt y corridos ──
+
+
+// El comando de un paso del prompt: la línea que empieza con `cd <path> && ` + `inicio`.
+// El path del mundo simulado no existe en disco: se cambia por el del escenario.
+const comandoDelPrompt = (prompt, inicio, cd) => {
+  const linea = prompt.split('\n').map((l) => l.trim()).find((l) => new RegExp(`^cd \\S+ && ${inicio}`).test(l))
+  assert.ok(linea, `el prompt no trae el comando que empieza con ${inicio}`)
+  return linea.replace(/^cd \S+ && /, `cd ${cd} && `)
+}
+
+test('publicar: el comando que el motor manda lleva el resumen del implementer tal cual al cuerpo del PR', async () => {
+  const resumen = `implementé \`parsearPliego()\` con $(touch pwned1) y it's "ok"`
+  const mundo = crearMundo({ issues: { 1: { titulo: 'feat: `touch pwned2` $(touch pwned3)' } } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    const r = orig(prompt, opts)
+    return opts.label === 'implementer:#1' ? { ...r, resumen, recursos_verificados: ['tabla `pliegos` — $(touch pwned1), 2026-10-18'] } : r
+  }
+  const { llamadas } = await correrMotor({ mundo })
+  const prompt = conLabel(llamadas, /^serializer:publish-i1$/)[0].prompt
+  for (const sh of shells) {
+    const e = escenario()
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'git push -u origin issue-1', e.wt)], { env: e.env, cwd: e.d })
+    assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), 'feat: `touch pwned2` $(touch pwned3)', sh)
+    const cuerpo = readFileSync(join(e.d, 'cuerpo-pr'), 'utf8')
+    assert.match(cuerpo, /^Closes #1\n/, sh)
+    assert.ok(cuerpo.includes(`\n${resumen}\n`), `${sh}: ${cuerpo}`)
+    assert.ok(cuerpo.includes('\n## Recursos verificados\n- tabla `pliegos` — $(touch pwned1), 2026-10-18\n'), `${sh}: ${cuerpo}`)
+    assert.match(cuerpo, /PR del pipeline sim-1018\. 🤖 Generated with \[Claude Code\]/, sh)
+    assert.ok(sinEjecutar(e), sh)
+  }
+})
+
+test('marcar issue: el comando que el motor manda lleva el rechazo de GitHub (con backticks) tal cual', async () => {
+  const rechazo = 'remote rejected: refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope $(touch pwned1)'
+  const mundo = crearMundo({ issues: { 207: {} }, fallas: { publicar: () => rechazo } })
+  const { llamadas } = await correrMotor({ mundo })
+  const prompt = conLabel(llamadas, /^serializer:block-i207$/)[0].prompt
+  for (const sh of shells) {
+    const e = escenario()
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'gh issue edit 207', e.repo)], { env: e.env, cwd: e.d })
+    assert.ok(readFileSync(join(e.d, 'cuerpo-issue'), 'utf8').includes(rechazo), sh)
+    assert.ok(sinEjecutar(e), sh)
+  }
+})
+
+test('publicar arreglos: los títulos que escribió el aplicador llegan tal cual al cuerpo del PR', async () => {
+  const titulo = 'off-by-one en `contar()` y $(touch pwned1)'
+  const mundo = crearMundo({ issues: { 1: {} } })
+  mundo.hallazgos = (pr) => (pr === 500 ? [{ titulo, ubicacion: 'src/a.ts:3', severidad: 'media', por_que: 'x', fix: 'y', decision: 'aplicar', razon: 'bug real' }] : [])
+  const { llamadas } = await correrMotor({ mundo })
+  const prompt = conLabel(llamadas, /^serializer:publish-arreglos-pr500$/)[0].prompt
+  for (const sh of shells) {
+    const e = escenario()
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'git push -u origin review/', e.wt)], { env: e.env, cwd: e.d })
+    assert.ok(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8').includes(`\n- ${titulo}\n`), sh)
+    assert.ok(e.llamadas().find((l) => l.startsWith('gh pr create')).includes('--head review/sim-1018-pr500 --label afk-agent-pr --label review-fix'), sh)
+    assert.ok(sinEjecutar(e), sh)
+  }
+})

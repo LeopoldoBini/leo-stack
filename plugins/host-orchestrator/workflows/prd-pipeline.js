@@ -366,11 +366,30 @@ function crearVigia({ umbral5h = 85, reservaSemanal = 10, minCarrilHoras = 0.5, 
 // gate pre-merge medía contra la base compartida y dio un rojo falso (1017b).
 const carpetaDeWorktree = (repo, nombre) => `${repo}/.host-orchestrator/wt/wf_${nombre.replace(/\//g, '-')}`
 
+// Texto que escribió un modelo o una persona (un motivo, el título de una issue, el
+// resumen de un implementer) dentro de un comando de shell (§3.2): siempre entre
+// comillas simples, con la comilla simple escapada acá. Entre comillas dobles, un
+// backtick o un `$(` lo ejecuta el shell —bash y zsh— y el texto llega mutilado.
+const comillasSimples = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+const entreComillas = (s) => comillasSimples(String(s).replace(/\s*\n\s*/g, ' '))
+// Un texto de varias líneas a un archivo temporal ($F), sin heredoc ni delimitador que
+// el texto pueda imitar: una línea por argumento de printf, cada una entre comillas simples.
+const textoAArchivo = (texto) => `F=$(mktemp) && printf '%s\\n' ${String(texto).split('\n').map(comillasSimples).join(' ')} > "$F"`
+
+// Marcar una issue para Leo (§3.16): etiqueta y comentario, con el motivo entre comillas simples.
+function comandoDeMarcarIssue({ repo, issue, comentario }) {
+  return `cd ${repo} && gh issue edit ${issue} --add-label agent-blocked && gh issue comment ${issue} --body ${entreComillas(comentario)}`
+}
+
+// Publicar una branch como PR (§3.2): push y PR en un comando; el título va entre
+// comillas simples y el cuerpo por archivo.
+function comandoDePublicarPr({ worktree, branch, base, labels, titulo, cuerpo, conHead = false }) {
+  return `cd ${worktree} && git push -u origin ${branch} && ${textoAArchivo(cuerpo)} && gh pr create --base ${base}${conHead ? ` --head ${branch}` : ''}${labels.map((l) => ` --label ${l}`).join('')} --title ${entreComillas(titulo)} --body-file "$F"`
+}
+
 // Marcar un PR para Leo (§3.16). La etiqueta y el comentario van adentro de un `case`
 // sobre el estado que reporta GitHub: a un PR MERGED no se le pone nada, aunque el
-// agente que corre el comando se equivoque. El comentario va entre comillas simples,
-// escapado acá: un motivo con backticks o `$(` entre comillas dobles lo ejecuta el shell.
-const entreComillas = (s) => `'${String(s).replace(/\s*\n\s*/g, ' ').replace(/'/g, `'\\''`)}'`
+// agente que corre el comando se equivoque.
 function comandoDeMarcarPr({ repo, pr, comentario }) {
   return `cd ${repo} && case "$(gh pr view ${pr} --json state --jq .state)" in MERGED) echo YA_MERGEADO ;; OPEN|CLOSED) gh pr edit ${pr} --add-label merge-blocked && gh pr comment ${pr} --body ${entreComillas(comentario)} && echo MARCADO ;; *) echo ESTADO_ILEGIBLE ;; esac`
 }
@@ -1067,7 +1086,8 @@ async function marcarIssue(n, motivo, fase, worktree) {
   const r = await serializar(
     `La issue #${n} queda para Leo: ${motivo}.
 1. CHECK: si la issue ya tiene la etiqueta agent-blocked y un comentario de la corrida ${A.runLabel} con este motivo: 'ya_estaba' y TERMINÁ.
-2. gh issue edit ${n} --add-label agent-blocked && gh issue comment ${n} --body "pipeline ${A.runLabel}: ${motivo}.${worktree ? ` Worktree conservado: ${worktree}` : ''}" (contexto audit: issue-${n}-blocked).${
+2. Etiqueta y comentario, con este comando tal cual y entero (el motivo va entre comillas simples: el shell no interpreta nada de lo que dice) (contexto audit: issue-${n}-blocked):
+   ${comandoDeMarcarIssue({ repo: REPO, issue: n, comentario: `pipeline ${A.runLabel}: ${motivo}.${worktree ? ` Worktree conservado: ${worktree}` : ''}` })}${
       worktree ? `\n3. CONSERVÁ el worktree ${worktree}: tiene el trabajo commiteado y no está en ningún otro lado. No lo limpies.` : ''
     }`,
     `block-i${n}`,
@@ -1183,16 +1203,27 @@ Reportá por el output estructurado (schema; no XML): worktree = ${impl.worktree
   return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl, arbol: g.pass ? med.arbol : null }
 }
 
+const PIE_DE_PR = `PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)`
+
 async function publicarIssue(r) {
+  const recursos = r.impl.recursos_verificados ?? []
+  // El cuerpo lo arma el motor; el serializer lo publica tal cual, por archivo.
+  const cuerpo = [
+    `Closes #${r.issue}`,
+    '',
+    r.impl.resumen ?? '',
+    // Es el anclaje a evidencia real: cómo se verificó y cuándo.
+    ...(recursos.length ? ['', '## Recursos verificados', ...recursos.map((v) => `- ${v}`)] : []),
+    '',
+    PIE_DE_PR,
+  ].join('\n')
+  const comando = comandoDePublicarPr({ worktree: r.impl.worktree, branch: r.impl.branch, base: RAMA, labels: [A.labels.agentPr], titulo: r.titulo ?? `issue #${r.issue}`, cuerpo })
   const publicar = (intento, extra = '') =>
     serializar(
       `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 4.
-2. cd ${r.impl.worktree} && git push -u origin ${r.impl.branch}, después gh pr create --base ${RAMA} --label ${A.labels.agentPr} --title "${r.titulo ?? `issue #${r.issue}`}" --body con: "Closes #${r.issue}", el resumen del implementer, ${
-        (r.impl.recursos_verificados ?? []).length
-          ? `una sección "## Recursos verificados" con estas líneas tal cual (es el anclaje a evidencia real: cómo se verificó y cuándo):\n${r.impl.recursos_verificados.map((v) => `   - ${v}`).join('\n')}\n   `
-          : ''
-      }y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: issue-${r.issue}-pr-create)
+2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo: el shell no interpreta nada de lo que dicen) (contexto audit: issue-${r.issue}-pr-create):
+   ${comando}
 3. VERIFICÁ: gh pr view ${r.impl.branch} --json number,state → el PR existe; su número va en pr_number.
 4. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree del merge. Solo conservalo si el push o el PR fallaron.
 Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle.${extra}`,
@@ -1570,10 +1601,12 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicados (títulos de EST
     registroRev.aplicados = []
     return
   }
+  const cuerpoArreglos = [`Arreglos de la revisión del PR #${item.pr}:`, ...registroRev.aplicados.map((t) => `- ${t}`), '', PIE_DE_PR].join('\n')
   const pub = await serializar(
     `Publicar los arreglos de la revisión del PR #${item.pr} (worktree ${apl.worktree}, branch ${apl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto o mergeado) de la branch ${apl.branch}? → reportá su número en pr_number ('ya_estaba') y saltá a 4.
-2. cd ${apl.worktree} && git push -u origin ${apl.branch}, después gh pr create --base ${RAMA} --head ${apl.branch} --label ${A.labels.agentPr} --label review-fix --title "revisión del PR #${item.pr}: arreglos (${A.runLabel})" --body con: "Arreglos de la revisión del PR #${item.pr}:", una línea por cada uno de estos —${registroRev.aplicados.join('; ')}— y "PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: review-pr-${item.pr}-create)
+2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo) (contexto audit: review-pr-${item.pr}-create):
+   ${comandoDePublicarPr({ worktree: apl.worktree, branch: apl.branch, base: RAMA, labels: [A.labels.agentPr, 'review-fix'], titulo: `revisión del PR #${item.pr}: arreglos (${A.runLabel})`, cuerpo: cuerpoArreglos, conHead: true })}
 3. VERIFICÁ: gh pr view ${apl.branch} --json number,state → su número va en pr_number.
 4. Si el PR existe: git worktree remove --force ${apl.worktree} && git worktree prune. Si el push o el PR fallaron: conservá el worktree y status 'blocked' con el error tal cual.`,
     `publish-arreglos-pr${item.pr}`,
