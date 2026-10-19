@@ -123,7 +123,7 @@ If completing the ticket seems to require crossing this boundary, that's informa
    - plus an index of ADRs and the prototype branch, if there is one. Open only what your slice consumes — it is an index precisely so you don't read all of it.
 5. The relevant code (Read + Grep + Glob as needed). Do not boil the ocean — anchor to the ticket's mentions.
 
-If your CWD is unclear, run `pwd` first. You should be inside `.claude/worktrees/<name>/` or a similar isolation path. If you see anything else, abort with `<promise>BLOCKED</promise>` + `UNEXPECTED_ERROR`.
+If your CWD is unclear, run `pwd` first. You should be inside `.claude/worktrees/<name>/` or a similar isolation path. If you see anything else, abort with `<promise>BLOCKED</promise>` + `UNEXPECTED_ERROR`. The one exception is a second attempt: the engine names the first attempt's worktree in your prompt and does not make that path your CWD. That worktree is yours: every command starts with `cd <that worktree> &&`, every path you read, edit or write lives under it, and where §5 and §8 say CWD, they mean it.
 
 ---
 

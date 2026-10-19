@@ -366,6 +366,15 @@ function crearVigia({ umbral5h = 85, reservaSemanal = 10, minCarrilHoras = 0.5, 
 // gate pre-merge medía contra la base compartida y dio un rojo falso (1017b).
 const carpetaDeWorktree = (repo, nombre) => `${repo}/.host-orchestrator/wt/wf_${nombre.replace(/\//g, '-')}`
 
+// Marcar un PR para Leo (§3.16). La etiqueta y el comentario van adentro de un `case`
+// sobre el estado que reporta GitHub: a un PR MERGED no se le pone nada, aunque el
+// agente que corre el comando se equivoque. El comentario va entre comillas simples,
+// escapado acá: un motivo con backticks o `$(` entre comillas dobles lo ejecuta el shell.
+const entreComillas = (s) => `'${String(s).replace(/\s*\n\s*/g, ' ').replace(/'/g, `'\\''`)}'`
+function comandoDeMarcarPr({ repo, pr, comentario }) {
+  return `cd ${repo} && case "$(gh pr view ${pr} --json state --jq .state)" in MERGED) echo YA_MERGEADO ;; OPEN|CLOSED) gh pr edit ${pr} --add-label merge-blocked && gh pr comment ${pr} --body ${entreComillas(comentario)} && echo MARCADO ;; *) echo ESTADO_ILEGIBLE ;; esac`
+}
+
 // ─── FIN DEL NÚCLEO PURO ───────────────────────────────────────────────────
 
 // §3.12.1 — args puede llegar objeto o string JSON según cómo se invoque el tool.
@@ -472,12 +481,22 @@ const SCRIPTS = READ_CLI.replace(/\/[^/]*$/, '')
 // o medir sobre un árbol: el Setup, el implementer, el applier y el validator.
 const DEPS_CLI = `${SCRIPTS}/deps-al-dia.sh`
 const DEPS = (donde) => `bash ${DEPS_CLI} ${donde}`
+// §3.17 — el merge de un PR aprobado: push, soltar la branch y mergear el commit
+// medido, reintentando solo mientras GitHub no recalculó el PR. Última línea:
+// MERGEADO | NO_MERGEADO, según el estado que GitHub reporta.
+const MERGEAR_CLI = `${SCRIPTS}/mergear-pr.sh`
 
-// Los tres roles mecánicos (scout, validator, serializer) corren como `operador`:
-// solo Bash, sin MCP ni catálogo de tools. Como agente genérico arrancaban en ~42K
-// tokens de prompt (devbox, 1017b) contra 19K del implementer; medido en la Mac
-// como sesión `claude -p --agent`: operador 12K, sesión con todas las tools 33K.
+// Todo agente del motor sale con un tipo propio y solo las tools de su rol (§3.11):
+// como agente genérico del Workflow arrancaba con todo el catálogo de la sesión (dos
+// Playwright MCP, context7, listados de skills): ~42K tokens de prompt antes de hacer
+// nada. Los tres roles mecánicos (scout, validator, serializer) corren como
+// `operador`, solo Bash; medido en la Mac como sesión `claude -p --agent`: operador
+// 12K, sesión con todas las tools 33K. El revisor solo lee, el aplicador edita sin
+// browser ni docs, y el reintento de una issue es trabajo de implementer: su tipo.
 const OPERADOR = 'host-orchestrator:operador'
+const IMPLEMENTER = 'host-orchestrator:parallel-implementer'
+const REVISOR = 'host-orchestrator:revisor'
+const APLICADOR = 'host-orchestrator:aplicador'
 // ¿La última medición trajo los tests del hook? Decide el tier del validator (§3.1).
 let testsDelHook = false
 
@@ -607,6 +626,13 @@ const DE_LA_INTEGRADORA = {
   arbol_integracion: { type: 'string', description: "git rev-parse 'HEAD^{tree}' de la integradora, tal cual" },
 }
 const REFRESCO_SCHEMA = { ...SERIALIZER_SCHEMA, properties: { ...SERIALIZER_SCHEMA.properties, ...DE_LA_INTEGRADORA } }
+// Marcar un PR: el motor decide por la línea que imprimió el shell, no por el status
+// ('ya_estaba' también puede leerse como "la etiqueta ya estaba").
+const MARCA_PR_SCHEMA = {
+  ...SERIALIZER_SCHEMA,
+  required: [...SERIALIZER_SCHEMA.required, 'salida'],
+  properties: { ...SERIALIZER_SCHEMA.properties, salida: { type: 'string', description: 'la última línea que imprimió el comando del paso 1, tal cual' } },
+}
 const INTEGRAR_SCHEMA = {
   type: 'object',
   required: ['status', 'mergeado', 'detalle'],
@@ -1052,15 +1078,26 @@ async function marcarIssue(n, motivo, fase, worktree) {
   return r
 }
 
+// Devuelve { mergeado: true } si GitHub reporta el PR MERGED: entonces no se marcó
+// nada, y quien llama decide cómo darlo por integrado.
 async function marcarPr(prNum, motivo, fase, { conservar = null } = {}) {
+  const comentario = `${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado, si quedó: ${conservar}` : ''}`
   const r = await serializar(
     `El PR #${prNum} queda para Leo: ${motivo}.
-1. CHECK: gh pr view ${prNum} --json state,mergedAt,labels → si ya está mergeado: 'ya_estaba' y TERMINÁ (no etiquetes ni comentes).
-2. gh pr edit ${prNum} --add-label merge-blocked && gh pr comment ${prNum} --body "${motivo} (pipeline ${A.runLabel})${conservar ? ` — worktree conservado, si quedó: ${conservar}` : ''}" (contexto audit: pr-${prNum}-blocked).
-3. ${conservar ? `Si existe el worktree ${conservar}, CONSERVALO: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
+1. Etiqueta y comentario, con este comando tal cual y entero: los pone solo si GitHub no reporta el PR como MERGED (contexto audit: pr-${prNum}-blocked).
+   ${comandoDeMarcarPr({ repo: REPO, pr: prNum, comentario })}
+   → salida = la última línea que imprimió, tal cual.
+   → YA_MERGEADO: el PR ya entró; no se etiqueta ni se comenta por ninguna otra vía. status 'ya_estaba' y TERMINÁ.
+   → MARCADO: hacé el paso 2 y reportá status 'ok'. Cualquier otra salida (ESTADO_ILEGIBLE, un error de gh): status 'blocked' con esa salida tal cual.
+2. ${conservar ? `Si existe el worktree ${conservar}, CONSERVALO: es la evidencia, o el único lugar donde vive el trabajo.` : `Si existe el worktree ${wtDePr(prNum)}, limpialo (git worktree remove --force + git worktree prune).`}`,
     `block-pr${prNum}`,
-    fase
+    fase,
+    MARCA_PR_SCHEMA
   )
+  if (r?.status === 'ya_estaba' && r.salida === 'YA_MERGEADO') {
+    log(`PR #${prNum}: GitHub lo reporta MERGED — no se marca para Leo (iba a quedar por: ${motivo})`)
+    return { ...r, mergeado: true }
+  }
   if (r && r.status !== 'blocked') registro.bloqueado(`pr${prNum}`, { ultimo: motivo })
   mergesReporte.push({ pr: prNum, resultado: 'merge-blocked', motivo })
   if (arregloDe.has(prNum)) {
@@ -1115,7 +1152,7 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
       model: M[tier],
       effort: esfuerzo,
       isolation: 'worktree',
-      agentType: 'host-orchestrator:parallel-implementer',
+      agentType: IMPLEMENTER,
       schema: IMPL_SCHEMA,
     }
   )
@@ -1130,11 +1167,12 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
     if (med?.arbol) memoria.olvidar(med.arbol)
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
     await llamar(
-      (suf) => `Sos el implementer de la issue #${iss.number} en tu SEGUNDO y ÚLTIMO intento. Tu trabajo está en ${impl.worktree} (branch ${impl.branch}) — cd ahí primero.
+      (suf) => `Sos el implementer de la issue #${iss.number} en tu SEGUNDO y ÚLTIMO intento. Tu trabajo está en ${impl.worktree} (branch ${impl.branch}): ése es tu worktree, no tu cwd, así que cada comando empieza con \`cd ${impl.worktree} &&\`.
 El gate (comparación numérica contra la integradora de la que partiste) falló por:
 ${g.motivos.map((m) => `  - ${m}`).join('\n')}
-Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, tests de tu área y no la suite completa, commit local al final).${suf}`,
-      { label: `retry:#${iss.number}`, phase: 'Despacho', model: M[tier], effort: esfuerzo, schema: IMPL_SCHEMA }
+Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, tests de tu área y no la suite completa, commit local al final).
+Reportá por el output estructurado (schema; no XML): worktree = ${impl.worktree}, branch, resumen.${suf}`,
+      { label: `retry:#${iss.number}`, phase: 'Despacho', model: M[tier], effort: esfuerzo, agentType: IMPLEMENTER, schema: IMPL_SCHEMA }
     )
     med = await medirFirme(impl.worktree, 'Despacho', `i${iss.number}-retry`, { conDiff: true })
     g = gate(med, b.metricas, { vedados: VEDADOS })
@@ -1275,9 +1313,9 @@ function promptIntegrar(item, aprobado) {
 4. cd ${wt} && git merge --no-edit origin/${RAMA} → CON conflicto: git merge --abort, status 'conflicto' con los archivos en detalle, y TERMINÁ. NO resuelvas.
 5. cd ${wt} && git status --porcelain | head -5 && case "$(git rev-parse 'HEAD^{tree}')" in ${aprobado ?? 'NINGUNO'}) echo MERGEAR ;; *) echo NO_MERGEAR ;; esac && git rev-parse 'HEAD^{tree}'
    → arbol = la última línea, TAL CUAL; limpio = ¿el status --porcelain no imprimió nada?
-   → Si imprimió MERGEAR y limpio es true, este comando, tal cual y entero (push, soltar la branch y mergear exactamente ese commit; si una parte falla, no sigue):
-      cd ${wt} && H=$(git rev-parse HEAD) && git push origin HEAD:${item.branch} && cd ${REPO} && git worktree remove --force ${wt} && git worktree prune && gh pr merge ${item.pr} --squash --delete-branch --match-head-commit "$H"
-      (contexto audit: pr-${item.pr}-merge). Si falló: status 'blocked' con el error tal cual. Si salió bien: VERIFICÁ con gh pr view ${item.pr} --json state que diga MERGED (si no, 'blocked'), hacé el paso 6, status 'ok', mergeado true.
+   → Si imprimió MERGEAR y limpio es true, este comando, tal cual, con timeout 300000 (push, soltar la branch y mergear exactamente ese commit; si una parte falla, no sigue; si GitHub todavía no recalculó el PR, espera y reintenta él solo):
+      bash ${MERGEAR_CLI} ${wt} ${REPO} ${RAMA} ${item.pr} ${item.branch}
+      (contexto audit: pr-${item.pr}-merge). Su última línea decide: MERGEADO → hacé el paso 6, status 'ok', mergeado true. NO_MERGEADO → status 'blocked' con el error que imprimió, tal cual; no reintentes el merge por tu cuenta.
    → Si imprimió NO_MERGEAR (o limpio es false): NO pushees ni mergees. status 'ok', mergeado false: el motor mide ese árbol y decide.
 6. cd ${WT_INTEGRACION} && git pull --ff-only origin ${RAMA} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion = la primera línea, arbol_integracion = la segunda, TAL CUAL.`
 }
@@ -1311,6 +1349,15 @@ async function integrarPr(item) {
   if (baseMovida) await moviendoIntegradora(refrescar)
   if (fatal) return
   registro.intento(clave, { ultimo: 'integración empezada y no terminada' })
+  // Un PR que GitHub reporta MERGED no queda para Leo: entró —lo mergeó el agente sin
+  // reportarlo, o alguien a mano— y se da por integrado como un merge que el motor no
+  // aprobó: la base se mide y se vigila. Desde que empieza la marca hasta fijar esa base
+  // la integradora está en movimiento: un scout de ese hueco vería al bloqueante DONE.
+  const paraLeo = (motivo) =>
+    moviendoIntegradora(async () => {
+      const m = await marcarPr(item.pr, motivo, 'Merge', { conservar: wt })
+      if (m?.mergeado) await integrado(item, { status: 'ya_estaba' }, null)
+    })
   for (let intento = 1; intento <= 3; intento++) {
     const aprobado = base ? arbolAprobado(memoria, base.metricas, arbolPorPr.get(item.pr)) : null
     // Mientras corre un integrar que puede mergear, y hasta fijar la base, la
@@ -1328,7 +1375,7 @@ async function integrarPr(item) {
       return
     }
     if (r.status === 'blocked') {
-      await marcarPr(item.pr, `integración bloqueada: ${r.detalle}`, 'Merge', { conservar: wt })
+      await paraLeo(`integración bloqueada: ${r.detalle}`)
       return
     }
     if (r.status === 'conflicto') {
@@ -1350,7 +1397,7 @@ ${r.detalle}`,
         'Merge'
       )
       if (v?.action !== 'MERGE' || v.resolution === 'INCOMPATIBLE') {
-        await marcarPr(item.pr, `merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`, 'Merge', { conservar: wt })
+        await paraLeo(`merge-resolver: ${v?.resolution ?? 'resolver murió'} — ${v?.resumen ?? 'sin veredicto'}`)
         return
       }
       continue // la resolución quedó commiteada en el worktree: el árbol nuevo se mide y se integra
@@ -1362,12 +1409,12 @@ ${r.detalle}`,
     const g = gate(med, base?.metricas ?? { metrics: {}, tests_failed: 0, failing_test_files: [], lockfiles_ajenos: [] }, { exigirTests: false })
     if (!g.pass) {
       if (med?.arbol) memoria.olvidar(med.arbol)
-      await marcarPr(item.pr, `gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`, 'Merge', { conservar: wt })
+      await paraLeo(`gate de no-regresión contra ${RAMA}: ${g.motivos.join('; ')}`)
       return
     }
     arbolPorPr.set(item.pr, med.arbol)
   }
-  await marcarPr(item.pr, 'la integración no convergió en tres intentos (el árbol cambió entre medición y merge)', 'Merge', { conservar: wt })
+  await paraLeo('la integración no convergió en tres intentos (el árbol cambió entre medición y merge)')
 }
 
 function encolarMerge(item) {
@@ -1417,7 +1464,7 @@ async function revisarPr(item) {
    - seguimiento: debajo del umbral — estilo, refactor, nombres, docs, redundancias.
    Un falso positivo no se reporta. Lista vacía si no hay nada real: no inventes hallazgos para justificarte.
 Reportá por schema: resumen y hallazgos.${suf}`,
-    { label: `revisor:pr${item.pr}`, phase: 'Revisión', model: M[T.reviewer], effort: E.reviewer, schema: REVISION_SCHEMA }
+    { label: `revisor:pr${item.pr}`, phase: 'Revisión', model: M[T.reviewer], effort: E.reviewer, agentType: REVISOR, schema: REVISION_SCHEMA }
   )
   const registroRev = { pr: item.pr, issue: item.issue, resumen: rev?.resumen ?? null, hallazgos: rev?.hallazgos ?? null, aplicados: [], fallados: [], pr_arreglos: null }
   revisiones.push(registroRev)
@@ -1502,6 +1549,7 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicados (títulos de EST
         model: M[T.applier],
         effort: E.applier,
         ...(primera ? { isolation: 'worktree' } : {}),
+        agentType: APLICADOR,
         schema: APPLIER_SCHEMA,
       }
     )
@@ -1635,7 +1683,9 @@ while (true) {
     const clave = `pr${item.pr}`
     if (enMerge.has(clave) || terminoEn[clave] > fotoPedida) continue
     if (registro.decidir(clave) === 'para_leo') {
-      await marcarPr(item.pr, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clave).ultimo})`, 'Merge', { conservar: wtDePr(item.pr) })
+      const m = await marcarPr(item.pr, `volvió a MERGE_READY en la misma corrida sin un hecho nuevo (último intento: ${registro.dato(clave).ultimo})`, 'Merge', { conservar: wtDePr(item.pr) })
+      // Entró entre la foto y la marca: el carril de merge lo ve MERGED y fija la base.
+      if (m?.mergeado) encolarMerge(item)
       continue
     }
     encolarMerge(item)

@@ -24,7 +24,7 @@ Antes de la primera corrida en un repo: **`/init`** — siembra el bloque de ope
 | El motor ejecutable | `workflows/prd-pipeline.js` |
 | Cómo lanzar (pre-flight, args, tiering T0, `cc-afk`) | `commands/prd-pipeline.md` |
 | Qué se siembra al adoptar el plugin en un repo, incluida la regla de dependencias entre tickets (pocas waves anchas) | `commands/init.md` |
-| Disciplina de los subagentes | `agents/parallel-implementer.md`, `agents/merge-resolver.md`, `agents/operador.md` (scout, validator y serializer: solo Bash) |
+| Disciplina de los subagentes | `agents/parallel-implementer.md` (también el reintento de una issue), `agents/merge-resolver.md`, `agents/operador.md` (scout, validator y serializer: solo Bash), `agents/revisor.md` (sin editor), `agents/aplicador.md` |
 | Cómo trabaja un agente sin nadie mirando, dentro o fuera del pipeline | `skills/desatendido/SKILL.md` |
 | Probar en la app: el rol, la receta de arranque y el contrato que usará el motor | `agents/tester.md`, `skills/probar/SKILL.md` — spec §3.10b y §3.15 |
 | El lado de lectura, corrible a mano antes de lanzar | `scripts/pipeline-read.sh` — spec §3.13b |
@@ -56,6 +56,7 @@ host-orchestrator/
 │   ├── test-pipeline-read.sh              # su test, contra fixtures/
 │   ├── deps-al-dia.sh                     # reinstala si el lockfile cambió respecto de lo instalado
 │   ├── test-deps-al-dia.sh                # su test, con package managers falsos
+│   ├── mergear-pr.sh                      # merge del commit medido; reintenta si GitHub no recalculó el PR
 │   └── fixtures/                           # salida de gh ya filtrada, un caso por directorio
 └── agents/
     ├── parallel-implementer.md            # TDD vertical slice; nunca pushea
@@ -63,6 +64,8 @@ host-orchestrator/
     ├── implementer.md                     # TDD sobre un encargo en prosa, fuera del pipeline
     ├── measurer.md                        # typecheck + suite, solo números
     ├── operador.md                        # el shell del motor: scout, validator, serializer
+    ├── revisor.md                         # la revisión de cada PR mergeado; sin editor
+    ├── aplicador.md                       # aplica los arreglos que decidió el revisor
     └── tester.md                          # usa la app en un navegador; sin edición
 ```
 

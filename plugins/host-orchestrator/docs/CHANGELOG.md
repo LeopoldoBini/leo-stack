@@ -2,6 +2,16 @@
 
 Historial extraído de la description del `plugin.json` (que lo acumulaba en violación del estándar de descriptions ≤ 40 palabras). Detalle técnico de cada mecanismo: la spec (`SPEC-v4-workflow-engine.md`).
 
+## 4.16.1 (2026-10-18)
+
+Dos arreglos medidos en la corrida `registro-1018` (Radar, devbox). Ninguna otra conducta del motor cambia.
+
+**El merge espera a que GitHub recalcule el PR** (spec §3.17). Seis veces en 2,5 h, el integrar que pushea el merge con la integradora y mergea en el acto recibió `GraphQL: Base branch was modified` (GitHub todavía no había recalculado el PR): el PR quedaba `merge-blocked` y trabado, porque el motor no re-despacha sin un hecho nuevo, hasta que la sesión T0 lo mergeaba a mano. El merge pasa a `scripts/mergear-pr.sh`: ante ese error, y solo ante ése, reintenta con el mismo `--match-head-commit`, esperando 5, 10, 20 y 30 s, salvo que la punta remota de la integradora ya no esté dentro de la historia del PR (se movió de verdad) o no se pueda leer. El veredicto sale del estado que reporta GitHub, no de la salida de `gh pr merge`. El reintento vive en un script y no en el prompt para que lo decida el código, no un Haiku interpretando un error.
+
+**A un PR que GitHub reporta MERGED no se le pone `merge-blocked`.** La etiqueta y el comentario van dentro de un `case` de shell sobre el estado del PR, armado por el motor, y el comentario va entre comillas simples escapadas (entre dobles, un motivo con backticks lo ejecutaba el shell). El motor lo da por entrado solo si la línea que imprimió ese `case` es `YA_MERGEADO` y el status del agente coincide: un `ya_estaba` suelto también se lee como «la etiqueta ya estaba». Si el PR ya entró, el motor lo da por integrado como un merge que no aprobó —mide la base y la vigila— en vez de marcarlo para Leo. Efecto a la vista: mientras se marca un PR para Leo desde el carril de merge (un turno de Haiku), no se despacha trabajo nuevo, porque hasta leer el estado no se sabe si la integradora se movió. En los timelines de GitHub de `registro-1018` no hay ninguna etiqueta puesta después de un merge: en los seis casos la etiqueta llegó primero y T0 mergeó 10–46 s después. La guarda cubre el caso que esa corrida mostró posible: alguien mergeando a mano con el motor corriendo.
+
+**Revisor, aplicador y reintento con tipo liviano** (spec §3.11). Salían como agente genérico, con todas las tools de la sesión (dos Playwright MCP, context7, listados de skills): ~43K de arranque en la corrida, contra ~13K del operador. Ahora `agents/revisor.md` (sin editor: `Bash, Read, Grep, Glob`), `agents/aplicador.md` (`Read, Edit, Write, Bash, Grep, Glob`) y el reintento con el tipo del implementer, `parallel-implementer`, que sabe trabajar en el worktree del primer intento. Arranque medido con `claude -p --agent` en la Mac: revisor 14,4K, aplicador 15,1K, parallel-implementer 20,1K, contra 34,7K de la sesión con todas las tools en el mismo lugar.
+
 ## 4.16.0 (2026-10-18)
 
 Las decisiones de Leo sobre la auditoría de las corridas de Radar. Versión aparte de 4.15.0 para poder revertirla sola.

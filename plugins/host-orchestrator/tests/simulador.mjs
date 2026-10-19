@@ -106,7 +106,8 @@ export async function correrMotor({ mundo, args = {}, budget } = {}) {
 //     publicar(n, intento)          → string = detalle del 'blocked'; falsy = publica
 //     implementer(n, intento)       → 'muere' | { bloqueado } | { toca: [paths] } | falsy
 //     medicion(etiqueta, intento)   → 'invalida' | falsy
-//     merge(pr, intento)            → string = detalle del 'blocked'
+//     merge(pr, intento)            → string = detalle del 'blocked'; { detalle, mergea: true } =
+//                                     'blocked' con el PR ya mergeado en GitHub
 //     rojo(n)                       → paths de test que el árbol de la issue rompe
 //   token: lo que reporta el chequeo de push del setup
 //   hook: true → el validator reporta tests_fuente 'hook'
@@ -256,6 +257,13 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       if (aprobado !== pr.arbol && !desobedece) return { status: 'ok', mergeado: false, arbol: pr.arbol, limpio: true, detalle: 'árbol nuevo' }
       const motivo = fallas.merge?.(num, intento)
       if (motivo === 'muere') return null
+      // { detalle, mergea: true }: el PR entró pero el agente reportó 'blocked' (gh
+      // falló después de mergear, o GitHub todavía mostraba el PR abierto).
+      if (motivo?.mergea) {
+        pr.merged = true
+        mergeadas.push(pr.issue ?? 9000 + pr.fixDe)
+        return { status: 'blocked', mergeado: false, detalle: motivo.detalle }
+      }
       if (motivo) return { status: 'blocked', mergeado: false, detalle: motivo }
       pr.merged = true
       mergeadas.push(pr.issue ?? 9000 + pr.fixDe)
@@ -269,7 +277,13 @@ export function crearMundo({ issues, fallas = {}, token = { via: 'https', tipo: 
       mundo.bloqueos.push(n)
       return { status: 'ok', detalle: 'etiquetada' }
     }
-    if ((m = tarea.match(/^block-pr(\d+)$/))) { prs.get(Number(m[1])).labels.add('merge-blocked'); return { status: 'ok', detalle: 'merge-blocked' } }
+    if ((m = tarea.match(/^block-pr(\d+)$/))) {
+      const pr = prs.get(Number(m[1]))
+      // El comando del motor es un `case` sobre el estado del PR: a uno MERGED no le pone nada.
+      if (pr.merged && /MERGED\) echo YA_MERGEADO/.test(prompt)) return { status: 'ya_estaba', salida: 'YA_MERGEADO', detalle: 'el PR ya entró' }
+      pr.labels.add('merge-blocked')
+      return { status: 'ok', salida: 'MARCADO', detalle: 'merge-blocked' }
+    }
     if ((m = tarea.match(/^registro-revision-pr(\d+)$/))) {
       const pr = prs.get(Number(m[1]))
       mundo.registros.push({ pr: Number(m[1]), texto: prompt.match(/<<'FIN_DEL_REGISTRO_PIPELINE'\n([\s\S]*?)\nFIN_DEL_REGISTRO_PIPELINE/)?.[1] })

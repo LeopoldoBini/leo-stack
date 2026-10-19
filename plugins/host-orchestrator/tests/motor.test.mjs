@@ -748,3 +748,99 @@ test('vigía: con horizonte corto, la semanal deja de limitar a un carril (decis
   assert.equal(con({}), 1, 'hasta el reinicio semanal')
   assert.equal(con({ horizonteHoras: 8 }), 3, 'mirando 8 h adelante')
 })
+
+// ── 4.16.1: merge que falla justo después del push, y tipos livianos para todos ──
+
+test('integrar: el merge de un PR aprobado es mergear-pr.sh con su timeout, no un gh pr merge suelto', async () => {
+  const { llamadas } = await correrMotor({ mundo: crearMundo({ issues: { 1: {} } }) })
+  const p = conLabel(llamadas, /^serializer:integrar-pr500$/)[0].prompt
+  assert.match(p, /bash \/plugin\/scripts\/mergear-pr\.sh \/repo\/\.host-orchestrator\/wt\/wf_pr-500 \/repo batch\/sim 500 issue-1\n/)
+  assert.match(p, /timeout 300000/)
+  assert.match(p, /MERGEADO → hacé el paso 6[\s\S]*NO_MERGEADO → status 'blocked'/)
+  assert.doesNotMatch(p, /gh pr merge/, 'el reintento vive en el script: un gh pr merge en el prompt lo saltea')
+})
+
+test('un PR que GitHub reporta MERGED no queda merge-blocked: se da por integrado y la base se mide', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] } }, fallas: { merge: (pr) => (pr === 500 ? { mergea: true, detalle: 'gh pr merge falló al borrar la branch' } : null) } })
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.deepEqual(mergeBlocked(mundo), [])
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+  assert.ok(!resultado.merges.some((m) => m.resultado === 'merge-blocked'), JSON.stringify(resultado.merges))
+  assert.ok(resultado.merges.some((m) => m.pr === 500 && m.resultado === 'ya_estaba'))
+  assert.ok(mundo.mediciones.some((m) => m.etiqueta === 'base-pr500'), 'un merge que el motor no confirmó: la base se mide')
+  assert.equal(conLabel(llamadas, /^revisor:pr500$/).length, 1)
+  const marca = conLabel(llamadas, /^serializer:block-pr500$/)[0]
+  assert.match(marca.prompt, /in MERGED\) echo YA_MERGEADO ;; OPEN\|CLOSED\) gh pr edit 500 --add-label merge-blocked/)
+})
+
+test('ningún agente del motor sale genérico: revisor, aplicador y retry con su tipo; cada tipo con allowlist de tools', async () => {
+  const mundo = crearMundo({
+    issues: { 1: {} },
+    fallas: {
+      rojo: (n, etiqueta, intento) => (etiqueta === 'i1' && intento === 1 ? ['src/x.test.ts'] : []),
+      integrar: (num, intento) => (num === 500 && intento === 1 ? 'conflicto' : null),
+    },
+  })
+  mundo.hallazgos = (pr) => (pr === 500 ? [hallazgo('aplicar', 'off-by-one')] : [])
+  const { llamadas } = await correrMotor({ mundo })
+  const tipo = (re) => conLabel(llamadas, re).map((c) => c.agentType)
+  assert.deepEqual(tipo(/^resolver:/), ['host-orchestrator:merge-resolver'])
+  assert.deepEqual(tipo(/^retry:/), ['host-orchestrator:parallel-implementer'], 'el reintento de un ticket es trabajo de implementer')
+  assert.deepEqual(tipo(/^revisor:/), ['host-orchestrator:revisor'])
+  assert.deepEqual(tipo(/^aplicador:/), ['host-orchestrator:aplicador'])
+  assert.match(conLabel(llamadas, /^retry:/)[0].prompt, /cada comando empieza con `cd \/repo\/\.claude\/worktrees\/wf_sim-1-1 &&`[\s\S]*schema; no XML/)
+  const fm = (nombre) => readFileSync(new URL(`../agents/${nombre}.md`, import.meta.url), 'utf8').split('---')[1]
+  const tools = (nombre) => fm(nombre).match(/^tools: (.+)$/m)?.[1].split(/,\s*/).sort()
+  for (const c of llamadas) {
+    assert.ok(c.agentType?.startsWith('host-orchestrator:'), `${c.label} salió genérico: arranca con todas las tools de la sesión`)
+    const nombre = c.agentType.split(':')[1]
+    assert.match(fm(nombre), new RegExp(`^name: ${nombre}$`, 'm'))
+    assert.ok(tools(nombre)?.length, `${nombre} sin allowlist de tools`)
+  }
+  assert.deepEqual(tools('revisor'), ['Bash', 'Glob', 'Grep', 'Read'], 'el revisor solo lee')
+  assert.deepEqual(tools('aplicador'), ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write'])
+})
+
+test('el motor decide por la línea del shell: un "ya_estaba" con la etiqueta puesta es merge-blocked, no un merge', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { merge: (pr) => (pr === 500 ? 'GraphQL: Base branch was modified' : null) } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    // El primer intento pone la etiqueta y muere; el segundo la ve puesta y dice "ya estaba".
+    if (opts.label === 'serializer:block-pr500') { mundo.prs.get(500).labels.add('merge-blocked'); return undefined }
+    if (opts.label === 'serializer:block-pr500~r2') return { status: 'ya_estaba', salida: 'MARCADO', detalle: 'la etiqueta merge-blocked ya estaba puesta' }
+    return orig(prompt, opts)
+  }
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.ok(!resultado.merges.some((m) => m.pr === 500 && m.resultado === 'ya_estaba'), JSON.stringify(resultado.merges))
+  assert.ok(resultado.merges.some((m) => m.pr === 500 && m.resultado === 'merge-blocked'))
+  assert.equal(conLabel(llamadas, /^revisor:pr500$/).length, 0, 'un PR abierto no se revisa como mergeado')
+  assert.equal(mundo.prs.get(500).merged, false)
+})
+
+test('un PR que entró mientras se marcaba: la dependiente no sale de una base sin su bloqueante', async () => {
+  const mundo = crearMundo({
+    issues: { 1: {}, 2: {}, 3: { deps: [1] } },
+    fallas: { merge: (pr) => (pr === 500 ? { mergea: true, detalle: 'gh pr view falló' } : null) },
+    duraciones: { 'implementer:#2': 40, 'serializer:integrar': 60, 'serializer:block-pr': 80, 'scout:': 20 },
+  })
+  const { resultado } = await correrMotor({ mundo })
+  const m3 = mundo.mediciones.find((m) => m.etiqueta === 'i3')
+  assert.ok(m3?.issues.includes(1), `#3 arrancó desde una base sin #1: ${JSON.stringify(m3?.issues)}`)
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+})
+
+test('despachador: un PR que vuelve sin hecho nuevo pero ya entró a mano se integra (base y revisión), no se marca', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] } }, fallas: { integrar: (num, intento) => (num === 500 && intento <= 2 ? 'muere' : null) } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    // Alguien lo mergea a mano entre la foto del scout y la marca.
+    if (/^serializer:block-pr500/.test(opts.label) && !mundo.prs.get(500).merged) { mundo.prs.get(500).merged = true; mundo.mergeadas.push(1) }
+    return orig(prompt, opts)
+  }
+  const { resultado, llamadas, logs } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+  assert.deepEqual(mergeBlocked(mundo), [])
+  assert.ok(logs.some((l) => /^base pr500:/.test(l)), 'la base se fija con el PR adentro')
+  assert.equal(conLabel(llamadas, /^revisor:pr500$/).length, 1)
+  assert.ok(mundo.mediciones.find((m) => m.etiqueta === 'i2').issues.includes(1), '#2 sale de una base con #1')
+})
