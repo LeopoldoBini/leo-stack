@@ -10,7 +10,7 @@
     {
       "name": "host-orchestrator",
       "description": "Motor v4 del pipeline AFK: /prd-pipeline lanza un Workflow que implementa, mergea y revisa issues sin barrera sobre una rama integradora; /init onboarda el repo; /desatendido corre sin supervisión; /probar usa la app en un navegador. Spec e historial: docs/.",
-      "version": "4.16.3",
+      "version": "4.16.4",
       "author": {
         "name": "Leopoldo Bini"
       },

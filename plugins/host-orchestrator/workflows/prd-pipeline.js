@@ -247,6 +247,25 @@ function arbolAprobado(memoria, base, arbol) {
   return med && gate(med, base, { exigirTests: false }).pass ? arbol : null
 }
 
+// Un merge reportado por el agente de integrar (§3.17). `confirmado`: la integradora quedó
+// en el árbol aprobado, que es una medición que el motor ya tiene, así que la base sale de
+// la memoria. El árbol del PR es un control más: si llegó y es otro, el agente mergeó lo
+// que no debía. Solo un id de git cuenta como dato. Un dato que falta no es una diferencia:
+// no confirma (la base se mide) y no da aviso: el agente que omite el árbol del PR con la
+// integradora en el aprobado no mergeó nada distinto.
+function veredictoDeMerge(r, aprobado) {
+  if (r.status !== 'ok') return { confirmado: false, aviso: null }
+  const delPr = esIdDeGit(r.arbol) ? r.arbol : null
+  const integradora = esIdDeGit(r.arbol_integracion) ? r.arbol_integracion : null
+  const difieren = []
+  if (!aprobado) difieren.push(`el agente mergeó ${delPr ? `el árbol ${delPr}` : 'un árbol'} sin que el motor aprobara ninguno`)
+  else {
+    if (delPr && delPr !== aprobado) difieren.push(`el agente mergeó el árbol ${delPr}, que no es el aprobado por el motor (${aprobado})`)
+    if (integradora && integradora !== aprobado) difieren.push(`la integradora quedó en el árbol ${integradora}, no en el aprobado (${aprobado})`)
+  }
+  return { confirmado: difieren.length === 0 && integradora === aprobado, aviso: difieren.length ? difieren.join('; ') : null }
+}
+
 // Tiers por rol (§3.1, 4.16.0). Lo mecánico corre en T3 (Haiku) por defecto y
 // `args.tiers` lo sube sin editar el motor. Guarda: sin los tests del hook, el
 // validator lee la salida cruda del runner de tests, y ahí Haiku puede leer un falso
@@ -374,7 +393,9 @@ const comillasSimples = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 const entreComillas = (s) => comillasSimples(String(s).replace(/\s*\n\s*/g, ' '))
 // Un texto de varias líneas a un archivo temporal ($F), sin heredoc ni delimitador que
 // el texto pueda imitar: una línea por argumento de printf, cada una entre comillas simples.
-const textoAArchivo = (texto) => `F=$(mktemp) && printf '%s\\n' ${String(texto).split('\n').map(comillasSimples).join(' ')} > "$F"`
+const lineasLiterales = (texto) => String(texto).split('\n').map(comillasSimples).join(' ')
+const argumentosAArchivo = (args) => `F=$(mktemp) && printf '%s\\n' ${args} > "$F"`
+const textoAArchivo = (texto) => argumentosAArchivo(lineasLiterales(texto))
 
 // Marcar una issue para Leo (§3.16): etiqueta y comentario, con el motivo entre comillas simples.
 function comandoDeMarcarIssue({ repo, issue, comentario }) {
@@ -382,9 +403,14 @@ function comandoDeMarcarIssue({ repo, issue, comentario }) {
 }
 
 // Publicar una branch como PR (§3.2): push y PR en un comando; el título va entre
-// comillas simples y el cuerpo por archivo.
-function comandoDePublicarPr({ worktree, branch, base, labels, titulo, cuerpo, conHead = false }) {
-  return `cd ${worktree} && git push -u origin ${branch} && ${textoAArchivo(cuerpo)} && gh pr create --base ${base}${conHead ? ` --head ${branch}` : ''}${labels.map((l) => ` --label ${l}`).join('')} --title ${entreComillas(titulo)} --body-file "$F"`
+// comillas simples y el cuerpo, con el `pie` al final, por archivo. Con `commitsDesde`, la
+// lista de commits de la branch la imprime git al publicar y va entre el cuerpo y el pie:
+// lo que entra lo dice el repo, no un texto de modelo. Si git no la puede listar, el PR
+// sale igual, con esa línea en vez de la lista.
+function comandoDePublicarPr({ worktree, branch, base, labels, titulo, cuerpo, pie, commitsDesde = null, conHead = false }) {
+  const commits = commitsDesde ? ` && C=$(git log --reverse --format='- %h %s' ${commitsDesde}..HEAD 2>/dev/null || echo '- (git log no pudo listar los commits)')` : ''
+  const archivo = argumentosAArchivo(`${lineasLiterales(cuerpo)}${commitsDesde ? ` '' '## Commits' "$C"` : ''} '' ${lineasLiterales(pie)}`)
+  return `cd ${worktree} && git push -u origin ${branch}${commits} && ${archivo} && gh pr create --base ${base}${conHead ? ` --head ${branch}` : ''}${labels.map((l) => ` --label ${l}`).join('')} --title ${entreComillas(titulo)} --body-file "$F"`
 }
 
 // El PR final (§3.2), draft de la integradora hacia la base: título y cuerpo los arma
@@ -666,9 +692,11 @@ const MARCA_PR_SCHEMA = {
   required: [...SERIALIZER_SCHEMA.required, 'salida'],
   properties: { ...SERIALIZER_SCHEMA.properties, salida: { type: 'string', description: 'la última línea que imprimió el comando del paso 1, tal cual' } },
 }
+// El árbol del PR y la integradora después del merge son obligatorios (§3.17): opcionales,
+// el agente los omitía, y sin ellos el motor no puede confirmar el merge.
 const INTEGRAR_SCHEMA = {
   type: 'object',
-  required: ['status', 'mergeado', 'detalle'],
+  required: ['status', 'mergeado', 'detalle', 'arbol', 'commit_integracion', 'arbol_integracion'],
   properties: {
     status: { type: 'string', enum: ['ok', 'ya_estaba', 'conflicto', 'blocked'] },
     mergeado: { type: 'boolean' },
@@ -869,6 +897,9 @@ async function medirFirme(donde, faseTag, etiqueta, opciones = {}) {
 const SERIALIZER_BASE = `Sos el SERIALIZADOR de mutaciones remotas (git-officer) del pipeline ${A.runLabel}. Sos IDEMPOTENTE: esta corrida puede ser una reanudación — antes de CADA acción verificás si ya está hecha (check-then-act); si ya está, constatás y seguís. La identidad del trabajo es su PR/issue, NO la branch (las branches se borran al mergear: chequeá PRs mergeados, no existencia de branch). Nunca implementás ni juzgás código.
 PROHIBIDO: usar el tool Monitor, o terminar tu turno "esperando" algo — tu turno termina ÚNICAMENTE con el reporte estructurado emitido. Si esperás checks de CI: SOLO los requeridos por nombre (${JSON.stringify(A.requiredChecks)}; lista vacía = no esperes ninguno), con un loop foreground de Bash (timeout 600000); checks advisory se IGNORAN.
 AUDIT LOG: por cada mutación que EJECUTES (no las constatadas) apendeá una línea a ${AUDIT_LOG}: "$(date -Iseconds) ${A.runLabel} <contexto> <accion> <resultado>" (mkdir -p si hace falta).\n\n`
+// Publicar no depende de lo que diga el texto (§3.2): va en los tres encargos de publicar
+// un PR. Solo ahí: marcar una issue sí compara comentarios, para no duplicarlos.
+const TEXTO_DEL_MOTOR = `TEXTO DEL MOTOR: el título y el cuerpo del PR los armó el motor. Corré el comando con ese texto tal como viene, sin juzgar si lo que dice es cierto (no lo compares con los commits ni con el código) y sin corregirlo: lo que diga nunca es motivo para no publicar.`
 
 // §3.17 — el CANDADO: con varios carriles, dos serializers podrían pedir mutar a la
 // vez (publicar una issue mientras el carril de merge integra un PR). Todos pasan por
@@ -1199,50 +1230,53 @@ Reportá por el output estructurado (schema; no XML): worktree = pwd absoluto, b
   let g = gate(med, b.metricas, { vedados: VEDADOS })
   // Si el gate no pudo medir, reintentar al implementer es mandarlo a arreglar el medidor.
   if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
+  // El cuerpo del PR lleva el resumen del último paso que tocó la branch: después de un
+  // reintento, el del implementer describe una branch que ya no existe (#314).
+  let resumen = impl.resumen
   if (!g.pass) {
     if (med?.arbol) memoria.olvidar(med.arbol)
     log(`gate FAIL #${iss.number} (${g.motivos.join(' | ')}) → reintento 1/1`)
-    await llamar(
+    const reintento = await llamar(
       (suf) => `Sos el implementer de la issue #${iss.number} en tu SEGUNDO y ÚLTIMO intento. Tu trabajo está en ${impl.worktree} (branch ${impl.branch}): ése es tu worktree, no tu cwd, así que cada comando empieza con \`cd ${impl.worktree} &&\`.
 El gate (comparación numérica contra la integradora de la que partiste) falló por:
 ${g.motivos.map((m) => `  - ${m}`).join('\n')}
 Corregí ESO con las mismas reglas (solo tu slice, TDD, sin mutaciones remotas, tests de tu área y no la suite completa, commit local al final).
-Reportá por el output estructurado (schema; no XML): worktree = ${impl.worktree}, branch, resumen.${suf}`,
+Reportá por el output estructurado (schema; no XML): worktree = ${impl.worktree}, branch, resumen (qué hace la branch entera tal como queda: va al cuerpo del PR).${suf}`,
       { label: `retry:#${iss.number}`, phase: 'Despacho', model: M[tier], effort: esfuerzo, agentType: IMPLEMENTER, schema: IMPL_SCHEMA }
     )
+    resumen = reintento?.resumen ?? 'El reintento después del gate no devolvió resumen: lo que entra son los commits de abajo.'
     med = await medirFirme(impl.worktree, 'Despacho', `i${iss.number}-retry`, { conDiff: true })
     g = gate(med, b.metricas, { vedados: VEDADOS })
     if (g.deMedicion) return { issue: iss.number, titulo: iss.title, gate: 'MEDICION', motivos: g.motivos, impl }
     if (!g.pass && med?.arbol) memoria.olvidar(med.arbol)
   }
   log(`gate ${g.pass ? 'PASS' : 'FAIL'} #${iss.number}${g.pass ? '' : ` (${g.motivos.join(' | ')})`}`)
-  return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl, arbol: g.pass ? med.arbol : null }
+  return { issue: iss.number, titulo: iss.title, gate: g.pass ? 'PASS' : 'FAIL', motivos: g.motivos, impl, resumen, desde, arbol: g.pass ? med.arbol : null }
 }
 
 const PIE_DE_PR = `PR del pipeline ${A.runLabel}. 🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 
 async function publicarIssue(r) {
   const recursos = r.impl.recursos_verificados ?? []
-  // El cuerpo lo arma el motor; el serializer lo publica tal cual, por archivo.
+  // El cuerpo lo arma el motor; el serializer lo publica tal cual, por archivo. La lista
+  // de commits la pone git al publicar, entre el cuerpo y el pie.
   const cuerpo = [
     `Closes #${r.issue}`,
     '',
-    r.impl.resumen ?? '',
+    r.resumen ?? '',
     // Es el anclaje a evidencia real: cómo se verificó y cuándo.
     ...(recursos.length ? ['', '## Recursos verificados', ...recursos.map((v) => `- ${v}`)] : []),
-    '',
-    PIE_DE_PR,
   ].join('\n')
-  const comando = comandoDePublicarPr({ worktree: r.impl.worktree, branch: r.impl.branch, base: RAMA, labels: [A.labels.agentPr], titulo: r.titulo ?? `issue #${r.issue}`, cuerpo })
+  const comando = comandoDePublicarPr({ worktree: r.impl.worktree, branch: r.impl.branch, base: RAMA, labels: [A.labels.agentPr], titulo: r.titulo ?? `issue #${r.issue}`, cuerpo, pie: PIE_DE_PR, commitsDesde: r.desde })
   const publicar = (intento, extra = '') =>
     serializar(
       `Publicar el trabajo de la issue #${r.issue} (worktree ${r.impl.worktree}, branch ${r.impl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto O mergeado) de la branch ${r.impl.branch}? → mergeado: 'ya_estaba'; abierto: constatá que esté al día y saltá a 4.
-2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo: el shell no interpreta nada de lo que dicen) (contexto audit: issue-${r.issue}-pr-create):
+2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo: el shell no interpreta nada de lo que dicen) (contexto audit: issue-${r.issue}-pr-create). ${TEXTO_DEL_MOTOR}
    ${comando}
 3. VERIFICÁ: gh pr view ${r.impl.branch} --json number,state → el PR existe; su número va en pr_number.
 4. Si el PR quedó abierto sin problemas: limpiá el worktree OBLIGATORIAMENTE (git worktree remove --force + git worktree prune) — un checkout residual de la branch bloquea el worktree del merge. Solo conservalo si el push o el PR fallaron.
-Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle.${extra}`,
+Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en detalle. Es el único motivo de 'blocked': lo que diga el cuerpo no lo es.${extra}`,
       intento === 1 ? `publish-i${r.issue}` : `publish-i${r.issue}~p${intento}`,
       'Despacho'
     )
@@ -1257,7 +1291,7 @@ Si el push o el PR fallan: status 'blocked' con el mensaje de error TAL CUAL en 
   if (pub?.status === 'blocked') {
     // Si Leo la destraba (arregla el token, por ejemplo), corresponde volver a publicar
     // este worktree, no reimplementar: queda anotado.
-    registro.anotar(`i${r.issue}`, { publicable: { titulo: r.titulo, impl: r.impl, arbol: r.arbol } })
+    registro.anotar(`i${r.issue}`, { publicable: r })
     await marcarIssue(r.issue, `publicación bloqueada dos veces: ${pub.detalle}`, 'Despacho', r.impl.worktree)
     return
   }
@@ -1277,7 +1311,7 @@ function despacharIssue(iss) {
       // estaba hecho y medido (al integrarlo, el motor vuelve a mirar la no-regresión).
       const p = registro.dato(`i${n}`)?.publicable
       if (p) log(`#${n} destrabada: se republica el worktree conservado ${p.impl.worktree}, sin reimplementar`)
-      const r = p ? { issue: n, titulo: p.titulo, gate: 'PASS', motivos: [], impl: p.impl, arbol: p.arbol } : await implementarConGate(iss, b)
+      const r = p ?? (await implementarConGate(iss, b))
       trabajos.push({ issue: r.issue, gate: r.gate, motivos: r.motivos })
       bugsReales.push(...(r.impl?.bugs_reales ?? []).map((x) => `[#${r.issue}] ${x}`))
       if (r.impl?.worktree) registro.anotar(`i${n}`, { worktree: r.impl.worktree })
@@ -1364,20 +1398,21 @@ function promptIntegrar(item, aprobado) {
       bash ${MERGEAR_CLI} ${wt} ${REPO} ${RAMA} ${item.pr} ${item.branch}
       (contexto audit: pr-${item.pr}-merge). Su última línea decide: MERGEADO → hacé el paso 6, status 'ok', mergeado true. NO_MERGEADO → status 'blocked' con el error que imprimió, tal cual; no reintentes el merge por tu cuenta.
    → Si imprimió NO_MERGEAR (o limpio es false): NO pushees ni mergees. status 'ok', mergeado false: el motor mide ese árbol y decide.
-6. cd ${WT_INTEGRACION} && git pull --ff-only origin ${RAMA} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion = la primera línea, arbol_integracion = la segunda, TAL CUAL.`
+6. cd ${WT_INTEGRACION} && git pull --ff-only origin ${RAMA} && git rev-parse HEAD 'HEAD^{tree}' → commit_integracion = la primera línea, arbol_integracion = la segunda, TAL CUAL.
+arbol, commit_integracion y arbol_integracion van SIEMPRE en el reporte, copiados de lo que imprimió el shell; el de un paso al que no llegaste va vacío ('').`
 }
 
-// Después de un merge. `confirmado`: el agente reportó, del shell, que mergeó el árbol
-// aprobado y que la integradora quedó en ése; ahí la base sale de la memoria. Si no
-// —un árbol que no era el aprobado, o un 'ya_estaba' que el motor no esperaba—, la
-// base se mide y se vigila: si la integradora empeoró, la corrida se frena.
+// Después de un merge. `confirmado` (veredictoDeMerge): la integradora quedó en el árbol
+// aprobado; ahí la base sale de la memoria. Si no —un árbol que no era el aprobado, un
+// dato que el agente no reportó, o un 'ya_estaba' que el motor no esperaba—, la base se
+// mide y se vigila: si la integradora empeoró, la corrida se frena. El aviso para Leo
+// sale solo con una diferencia reportada, no con un dato que falta.
 async function integrado(item, r, aprobado) {
-  const confirmado = r.status === 'ok' && aprobado !== null && r.arbol === aprobado && r.arbol_integracion === aprobado
-  if (!confirmado && r.status === 'ok') {
-    const aviso = `PR #${item.pr}: el agente mergeó el árbol ${r.arbol}, que no es el aprobado por el motor (${aprobado ?? 'ninguno'})`
-    avisos.push(aviso)
-    log(`⚠ ${aviso}`)
-  }
+  const { confirmado, aviso } = veredictoDeMerge(r, aprobado)
+  if (aviso) {
+    avisos.push(`PR #${item.pr}: ${aviso}`)
+    log(`⚠ ${avisos.at(-1)}`)
+  } else if (!confirmado && r.status === 'ok') log(`merge PR #${item.pr}: el reporte no trajo el árbol de la integradora — la base se mide`)
   log(`merge PR #${item.pr}: ${r.status}`)
   mergesReporte.push({ pr: item.pr, resultado: r.status === 'ya_estaba' ? 'ya_estaba' : 'mergeado' })
   registro.anotar(`pr${item.pr}`, { ultimo: `merge ${r.status}` })
@@ -1617,12 +1652,12 @@ Reportá por schema: worktree (pwd absoluto), branch, aplicados (títulos de EST
     registroRev.aplicados = []
     return
   }
-  const cuerpoArreglos = [`Arreglos de la revisión del PR #${item.pr}:`, ...registroRev.aplicados.map((t) => `- ${t}`), '', PIE_DE_PR].join('\n')
+  const cuerpoArreglos = [`Arreglos de la revisión del PR #${item.pr}:`, ...registroRev.aplicados.map((t) => `- ${t}`)].join('\n')
   const pub = await serializar(
     `Publicar los arreglos de la revisión del PR #${item.pr} (worktree ${apl.worktree}, branch ${apl.branch}):
 1. CHECK identidad de trabajo: ¿hay PR (abierto o mergeado) de la branch ${apl.branch}? → reportá su número en pr_number ('ya_estaba') y saltá a 4.
-2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo) (contexto audit: review-pr-${item.pr}-create):
-   ${comandoDePublicarPr({ worktree: apl.worktree, branch: apl.branch, base: RAMA, labels: [A.labels.agentPr, 'review-fix'], titulo: `revisión del PR #${item.pr}: arreglos (${A.runLabel})`, cuerpo: cuerpoArreglos, conHead: true })}
+2. Push y PR, con este comando tal cual y entero (título y cuerpo ya armados, entre comillas simples y por archivo) (contexto audit: review-pr-${item.pr}-create). ${TEXTO_DEL_MOTOR}
+   ${comandoDePublicarPr({ worktree: apl.worktree, branch: apl.branch, base: RAMA, labels: [A.labels.agentPr, 'review-fix'], titulo: `revisión del PR #${item.pr}: arreglos (${A.runLabel})`, cuerpo: cuerpoArreglos, pie: PIE_DE_PR, conHead: true })}
 3. VERIFICÁ: gh pr view ${apl.branch} --json number,state → su número va en pr_number.
 4. Si el PR existe: git worktree remove --force ${apl.worktree} && git worktree prune. Si el push o el PR fallaron: conservá el worktree y status 'blocked' con el error tal cual.`,
     `publish-arreglos-pr${item.pr}`,
@@ -1839,7 +1874,7 @@ if (allDone) {
     'PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)',
   ].join('\n')
   const cierre = await serializar(
-    `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}. El título y el cuerpo ya los armó el motor: van entre comillas simples y por archivo, y el shell no interpreta nada de lo que dicen.
+    `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}. El título y el cuerpo ya los armó el motor: van entre comillas simples y por archivo, y el shell no interpreta nada de lo que dicen. ${TEXTO_DEL_MOTOR}
 1. cd ${WT_INTEGRACION} && git pull --ff-only
 2. El PR draft, con este comando tal cual y entero (contexto audit: pr-final-create). Él mismo chequea la identidad de trabajo: si ya hay un PR final abierto o mergeado (uno cerrado sin mergear no cuenta), no crea otro e imprime YA_EXISTE <número> <estado>.
    ${comandoDePrFinal({ dir: WT_INTEGRACION, base: BASE, rama: RAMA, titulo: `${SCOPE_DESC} — pipeline ${A.runLabel}`, cuerpo })}

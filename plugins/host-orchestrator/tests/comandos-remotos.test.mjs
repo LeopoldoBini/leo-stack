@@ -3,7 +3,8 @@
 //   scripts/mergear-pr.sh         el merge de un PR aprobado, con su reintento
 //   comandoDeMarcarPr (motor)     la etiqueta merge-blocked, nunca sobre un PR MERGED
 //   comandoDeMarcarIssue (motor)  la etiqueta agent-blocked con su motivo
-//   comandoDePublicarPr (motor)   push + PR con título y cuerpo escritos por modelos
+//   comandoDePublicarPr (motor)   push + PR con título y cuerpo escritos por modelos, y los
+//                                 commits de la branch listados por git al publicar
 //   comandoDePrFinal (motor)      el PR final draft, con el cuerpo que arma el motor
 //   comandoDeSumarCloses (motor)  los `Closes #` que le falten a un PR final ya abierto
 //
@@ -81,6 +82,7 @@ case "$1" in
   worktree) exit 0 ;;
   ls-remote) printf '%s\\trefs/heads/batch/sim\\n' "$(cat "$D/remota" 2>/dev/null || echo ${B})" ;;
   merge-base) [ "$2" = --is-ancestor ] && [ "$3" = "${B}" ] && [ "$4" = "${H}" ] ;;
+  log) [ -f "$D/log-falla" ] && { echo "fatal: bad revision" >&2; exit 128; }; cat "$D/commits" 2>/dev/null; exit 0 ;;
 esac
 `
 const SLEEP = `#!/usr/bin/env bash
@@ -232,14 +234,34 @@ for (const sh of shells) {
   test(`publicar PR (${sh}): título y cuerpo de modelo llegan tal cual, sin que el shell ejecute nada`, () => {
     const e = escenario()
     const titulo = `feat: ${PELIGROSO} $(touch pwned3)`
-    const cuerpo = `Closes #12\n\n${PELIGROSO}\n\n## Recursos verificados\n- tabla \`x\` — $(touch pwned3), 2026-10-18\n\nPR del pipeline sim. 🤖`
-    execFileSync(sh, ['-c', comandoDePublicarPr({ worktree: e.wt, branch: 'review/sim-pr5', base: 'batch/sim', labels: ['afk-agent-pr', 'review-fix'], titulo, cuerpo, conHead: true })], { env: e.env, cwd: e.d })
+    const cuerpo = `Closes #12\n\n${PELIGROSO}\n\n## Recursos verificados\n- tabla \`x\` — $(touch pwned3), 2026-10-18`
+    const pie = `PR del pipeline sim. 🤖 ${PELIGROSO}`
+    execFileSync(sh, ['-c', comandoDePublicarPr({ worktree: e.wt, branch: 'review/sim-pr5', base: 'batch/sim', labels: ['afk-agent-pr', 'review-fix'], titulo, cuerpo, pie, conHead: true })], { env: e.env, cwd: e.d })
     const ll = e.llamadas()
     assert.ok(ll.includes('git push -u origin review/sim-pr5'))
     assert.match(ll.find((l) => l.startsWith('gh pr create')), /^gh pr create --base batch\/sim --head review\/sim-pr5 --label afk-agent-pr --label review-fix --title /)
     assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), titulo)
-    assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `${cuerpo}\n`)
+    assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `${cuerpo}\n\n${pie}\n`)
     assert.ok(sinEjecutar(e))
+  })
+
+  test(`publicar PR (${sh}): los commits los lista git al publicar, entre el cuerpo y el pie, sin que el shell ejecute sus asuntos`, () => {
+    const e = escenario()
+    const commits = '- 2efcc2c separa la copia `nocturna`\n- 55d202e arregla $(touch pwned1) el test'
+    writeFileSync(join(e.d, 'commits'), `${commits}\n`)
+    execFileSync(sh, ['-c', comandoDePublicarPr({ worktree: e.wt, branch: 'issue-1', base: 'batch/sim', labels: ['afk-agent-pr'], titulo: 't', cuerpo: `Closes #1\n\n${PELIGROSO}`, pie: 'PR del pipeline sim. 🤖', commitsDesde: H })], { env: e.env, cwd: e.d })
+    assert.ok(e.llamadas().includes(`git log --reverse --format=- %h %s ${H}..HEAD`))
+    assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `Closes #1\n\n${PELIGROSO}\n\n## Commits\n${commits}\n\nPR del pipeline sim. 🤖\n`)
+    assert.ok(sinEjecutar(e))
+
+    // Si git no puede listar los commits, el PR sale igual: publicar no depende de la lista.
+    // Y sin un error de git a la vista del operador, que lo leería como un comando que falló.
+    const f = escenario()
+    writeFileSync(join(f.d, 'log-falla'), '')
+    const r = spawnSync(sh, ['-c', comandoDePublicarPr({ worktree: f.wt, branch: 'issue-1', base: 'batch/sim', labels: [], titulo: 't', cuerpo: 'Closes #1', pie: 'pie', commitsDesde: H })], { env: f.env, cwd: f.d, encoding: 'utf8' })
+    assert.equal(r.status, 0)
+    assert.doesNotMatch(r.stderr, /fatal/)
+    assert.equal(readFileSync(join(f.d, 'cuerpo-pr'), 'utf8'), 'Closes #1\n\n## Commits\n- (git log no pudo listar los commits)\n\npie\n')
   })
 
   test(`PR final (${sh}): draft con título y cuerpo tal cual, sin que el shell ejecute nada`, () => {
@@ -328,6 +350,55 @@ test('publicar: el comando que el motor manda lleva el resumen del implementer t
     assert.match(cuerpo, /PR del pipeline sim-1018\. 🤖 Generated with \[Claude Code\]/, sh)
     assert.ok(sinEjecutar(e), sh)
   }
+})
+
+// #314 (registro-1019c): el implementer dijo «en un commit (2efcc2c)», el reintento sumó otro
+// y el operador se negó dos veces a publicar porque el cuerpo «sería falso».
+test('publicar después de un reintento (#314): el cuerpo lleva el resumen del reintento y los commits que lista git, nada del implementer que el reintento dejó viejo', async () => {
+  const mundo = crearMundo({ issues: { 1: {} }, fallas: { rojo: (n, etiqueta) => (etiqueta === 'i1' ? ['src/x.test.ts'] : []) } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    const r = orig(prompt, opts)
+    if (opts.label === 'implementer:#1') return { ...r, resumen: 'Listo #1, en un commit (2efcc2c) sobre la base.' }
+    if (opts.label === 'retry:#1') return { ...r, resumen: 'La copia nocturna sale del programador; el test del corte ya no importa `claves` directo.' }
+    return r
+  }
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+  assert.equal(conLabel(llamadas, /^retry:#1$/).length, 1, 'el escenario pasa por el reintento')
+  assert.match(conLabel(llamadas, /^retry:#1$/)[0].prompt, /resumen \(qué hace la branch entera tal como queda: va al cuerpo del PR\)/)
+  const desde = conLabel(llamadas, /^implementer:#1$/)[0].prompt.match(/git checkout -B issue-1 (\S+)/)[1]
+  const prompt = conLabel(llamadas, /^serializer:publish-i1$/)[0].prompt
+  const commits = '- 2efcc2c la copia nocturna sale del programador\n- 55d202e el test del corte usa `claves` por el servicio $(touch pwned1)'
+  for (const sh of shells) {
+    const e = escenario()
+    writeFileSync(join(e.d, 'commits'), `${commits}\n`)
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'git push -u origin issue-1', e.wt)], { env: e.env, cwd: e.d })
+    assert.ok(e.llamadas().includes(`git log --reverse --format=- %h %s ${desde}..HEAD`), `${sh}: los commits desde la base de la que partió la branch`)
+    const cuerpo = readFileSync(join(e.d, 'cuerpo-pr'), 'utf8')
+    assert.ok(cuerpo.includes('\nLa copia nocturna sale del programador; el test del corte ya no importa `claves` directo.\n'), `${sh}: ${cuerpo}`)
+    assert.ok(!cuerpo.includes('en un commit'), `${sh}: el resumen del implementer quedó viejo con el reintento: ${cuerpo}`)
+    assert.ok(cuerpo.includes(`\n## Commits\n${commits}\n\nPR del pipeline sim-1018.`), `${sh}: ${cuerpo}`)
+    assert.ok(sinEjecutar(e), sh)
+  }
+})
+
+test('publicar no depende de que el operador valide el cuerpo: el encargo le prohíbe juzgarlo y solo un comando que falla es blocked', async () => {
+  const mundo = crearMundo({ issues: { 1: {} } })
+  mundo.hallazgos = (pr) => (pr === 500 ? [{ titulo: 't', ubicacion: 'src/a.ts:3', severidad: 'media', por_que: 'x', fix: 'y', decision: 'aplicar', razon: 'bug real' }] : [])
+  const { llamadas } = await correrMotor({ mundo })
+  const encargos = conLabel(llamadas, /^serializer:(publish-i1|publish-arreglos-pr500|pr-final)$/)
+  assert.equal(encargos.length, 3)
+  for (const c of encargos) {
+    assert.match(c.prompt, /TEXTO DEL MOTOR: [^\n]*Corré el comando con ese texto tal como viene, sin juzgar si lo que dice es cierto/, c.label)
+    assert.match(c.prompt, /nunca es motivo para no publicar/, c.label)
+  }
+  assert.match(encargos[0].prompt, /Es el único motivo de 'blocked'/)
+  // Solo al publicar: marcar una issue sí compara comentarios (su CHECK de idempotencia).
+  const otro = await correrMotor({ mundo: crearMundo({ issues: { 207: {} }, fallas: { publicar: () => 'rechazo' } }) })
+  const marca = conLabel(otro.llamadas, /^serializer:block-i207$/)[0].prompt
+  assert.doesNotMatch(marca, /TEXTO DEL MOTOR/)
+  assert.match(marca, /CHECK: si la issue ya tiene la etiqueta agent-blocked y un comentario/)
 })
 
 test('marcar issue: el comando que el motor manda lleva el rechazo de GitHub (con backticks) tal cual', async () => {

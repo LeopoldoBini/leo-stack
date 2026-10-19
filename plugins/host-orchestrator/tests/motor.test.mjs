@@ -290,13 +290,19 @@ test('un re-despacho por hecho nuevo usa otra branch (la anterior sigue en su wo
 test('publicación destrabada: se republica el worktree conservado, sin reimplementar', async () => {
   const mundo = crearMundo({
     issues: { 207: {} },
-    fallas: { publicar: (n, intento) => (intento <= 2 ? rechazoWorkflow : null) },
+    fallas: { publicar: (n, intento) => (intento <= 2 ? rechazoWorkflow : null), rojo: (n, etiqueta) => (etiqueta === 'i207' ? ['src/x.test.ts'] : []) },
     alInvocar: destrabaIssue(207),
   })
   const { resultado, llamadas } = await correrMotor({ mundo })
   assert.equal(conLabel(llamadas, /^implementer:#207$/).length, 1)
   assert.equal(resultado.status, 'DONE')
-  assert.match(conLabel(llamadas, /^serializer:publish-i207$/).at(-1).prompt, /wf_sim-207-1/)
+  const republicar = conLabel(llamadas, /^serializer:publish-i207$/).at(-1).prompt
+  assert.match(republicar, /wf_sim-207-1/)
+  // Con el cuerpo del último paso (#314): el resumen del reintento y los commits desde la base de partida.
+  const desde = conLabel(llamadas, /^implementer:#207$/)[0].prompt.match(/git checkout -B issue-207 (\S+)/)[1]
+  assert.ok(republicar.includes(`'Closes #207' '' 'retry'`), 'el resumen del reintento')
+  assert.ok(!republicar.includes('implementé #207'), 'no el del implementer que el reintento dejó viejo')
+  assert.ok(republicar.includes(`${desde}..HEAD`))
 })
 
 test('si el medidor no puede medir, el implementer no se reintenta: queda para Leo como problema del medidor', async () => {
@@ -339,7 +345,7 @@ test('bloqueadas sale sin repetidos', async () => {
 
 // ── Entrega 2: despacho continuo, revisión por PR, Haiku en lo mecánico ──
 
-const Q = nucleoPuro(['crearCandado', 'crearTimbre', 'crearVigia', 'tierEfectivo', 'arbolAprobado', 'crearMemoria'])
+const Q = nucleoPuro(['crearCandado', 'crearTimbre', 'crearVigia', 'tierEfectivo', 'arbolAprobado', 'crearMemoria', 'veredictoDeMerge'])
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms))
 const solapan = (xs) => xs.some((a, i) => xs.some((b, j) => i < j && a.inicio < b.fin && b.inicio < a.fin))
 const maxSimultaneos = (xs) => Math.max(0, ...xs.map((a) => xs.filter((b) => b.inicio <= a.inicio && a.inicio < b.fin).length))
@@ -848,4 +854,61 @@ test('despachador: un PR que vuelve sin hecho nuevo pero ya entró a mano se int
   assert.ok(logs.some((l) => /^base pr500:/.test(l)), 'la base se fija con el PR adentro')
   assert.equal(conLabel(llamadas, /^revisor:pr500$/).length, 1)
   assert.ok(mundo.mediciones.find((m) => m.etiqueta === 'i2').issues.includes(1), '#2 sale de una base con #1')
+})
+
+// ── 4.16.4: el aviso «mergeó el árbol undefined» de registro-1018 ──
+
+test('veredictoDeMerge: confirma con la integradora en el aprobado; avisa solo con una diferencia reportada', () => {
+  const ap = 'a'.repeat(40)
+  const otro = 'b'.repeat(40)
+  const v = (r, aprobado = ap) => Q.veredictoDeMerge({ status: 'ok', ...r }, aprobado)
+  assert.deepEqual(v({ arbol: ap, arbol_integracion: ap }), { confirmado: true, aviso: null })
+  assert.deepEqual(v({ arbol_integracion: ap }), { confirmado: true, aviso: null }, 'sin el árbol del PR, como en registro-1018')
+  assert.deepEqual(v({ arbol: '', arbol_integracion: ap }), { confirmado: true, aviso: null })
+  assert.deepEqual(v({ arbol: ap }), { confirmado: false, aviso: null }, 'sin la integradora: no confirma, y un dato que falta no es una diferencia')
+  assert.deepEqual(v({ arbol: ap, arbol_integracion: 'NO_APLICA' }), { confirmado: false, aviso: null })
+  const pr = v({ arbol: otro, arbol_integracion: ap })
+  assert.equal(pr.confirmado, false)
+  assert.equal(pr.aviso, `el agente mergeó el árbol ${otro}, que no es el aprobado por el motor (${ap})`)
+  const integradora = v({ arbol: ap, arbol_integracion: otro })
+  assert.equal(integradora.confirmado, false)
+  assert.equal(integradora.aviso, `la integradora quedó en el árbol ${otro}, no en el aprobado (${ap})`)
+  assert.match(v({ arbol: otro, arbol_integracion: otro }, null).aviso, /^el agente mergeó el árbol b{40} sin que el motor aprobara ninguno$/)
+  assert.match(v({ arbol_integracion: otro }, null).aviso, /^el agente mergeó un árbol sin que el motor aprobara ninguno$/)
+  assert.deepEqual(Q.veredictoDeMerge({ status: 'ya_estaba', arbol_integracion: otro }, ap), { confirmado: false, aviso: null })
+})
+
+test('merge cuyo reporte no trae el árbol del PR (registro-1018): sin aviso falso, y la base sale de la memoria sin medir', async () => {
+  const mundo = crearMundo({ issues: { 1: {}, 2: { deps: [1] } } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    const r = orig(prompt, opts)
+    if (!/^serializer:integrar-pr/.test(opts.label) || !r?.mergeado) return r
+    const { arbol, ...sinArbol } = r
+    return sinArbol
+  }
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE', JSON.stringify(resultado.para_leo))
+  assert.deepEqual(resultado.avisos, [])
+  assert.deepEqual(conLabel(llamadas, /^validator:base-/).map((c) => c.label), ['validator:base-inicial'])
+})
+
+test('integrar: el árbol del PR y el de la integradora son obligatorios en el reporte', async () => {
+  const { llamadas } = await correrMotor({ mundo: crearMundo({ issues: { 1: {} } }) })
+  const c = conLabel(llamadas, /^serializer:integrar-pr500$/)[0]
+  for (const k of ['arbol', 'commit_integracion', 'arbol_integracion']) assert.ok(c.schema.required.includes(k), `${k} no es obligatorio`)
+  assert.match(c.prompt, /arbol, commit_integracion y arbol_integracion van SIEMPRE en el reporte/)
+})
+
+test('una integradora que quedó en otro árbol da aviso y la base se mide', async () => {
+  const otro = 'c'.repeat(40)
+  const mundo = crearMundo({ issues: { 1: {} } })
+  const orig = mundo.responder.bind(mundo)
+  mundo.responder = (prompt, opts) => {
+    const r = orig(prompt, opts)
+    return opts.label === 'serializer:integrar-pr500' && r?.mergeado ? { ...r, arbol_integracion: otro } : r
+  }
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.ok(resultado.avisos.some((a) => a.startsWith(`PR #500: la integradora quedó en el árbol ${otro}, no en el aprobado`)), JSON.stringify(resultado.avisos))
+  assert.equal(conLabel(llamadas, /^validator:base-pr500/).length, 1)
 })
