@@ -4,6 +4,8 @@
 //   comandoDeMarcarPr (motor)     la etiqueta merge-blocked, nunca sobre un PR MERGED
 //   comandoDeMarcarIssue (motor)  la etiqueta agent-blocked con su motivo
 //   comandoDePublicarPr (motor)   push + PR con título y cuerpo escritos por modelos
+//   comandoDePrFinal (motor)      el PR final draft, con el cuerpo que arma el motor
+//   comandoDeSumarCloses (motor)  los `Closes #` que le falten a un PR final ya abierto
 //
 // Todo texto que escribió un modelo o una persona llega al remoto tal cual: el shell
 // no ejecuta backticks ni `$(` (eso lo prueban los textos con `touch pwned`).
@@ -37,8 +39,25 @@ case "$1 $2" in
       ok-sin-borrar) echo MERGED > "$D/estado"; echo "failed to delete local branch $3" >&2; exit 1 ;;
       otro) echo "Pull request #$3 is not mergeable: the base branch policy prohibits the merge." >&2; exit 1 ;;
     esac ;;
-  "pr view") [ -f "$D/estado" ] && cat "$D/estado" || exit 1 ;;
-  "pr edit") exit 0 ;;
+  "pr view")
+    case "$*" in
+      *'--json body'*) cat "$D/cuerpo-existente" ;;
+      *) [ -f "$D/estado" ] && cat "$D/estado" || exit 1 ;;
+    esac ;;
+  "pr list")
+    # Como gh: filtra por head, base y estado, aplica --jq con un jq de verdad y no
+    # imprime los null. Los PRs del escenario están en prs.json, todos de batch/sim → main.
+    shift 2; HEAD=; BASE=; ESTADO=open; JQ=.
+    while [ $# -gt 0 ]; do
+      case "$1" in --head) HEAD=$2; shift ;; --base) BASE=$2; shift ;; --state) ESTADO=$2; shift ;; --jq) JQ=$2; shift ;; esac
+      shift
+    done
+    { [ "$HEAD" = batch/sim ] && [ "$BASE" = main ] && [ -f "$D/prs.json" ]; } || exit 0
+    jq -c --arg e "$ESTADO" 'map(select($e == "all" or (.state | ascii_downcase) == $e))' "$D/prs.json" | jq -r "($JQ) | select(. != null)"
+    exit 0 ;;
+  "pr edit")
+    while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cat "$2" > "$D/cuerpo-editado"; shift; done
+    exit 0 ;;
   "pr comment") printf '%s' "$5" > "$D/cuerpo"; exit 0 ;;
   "issue edit") exit 0 ;;
   "issue comment") printf '%s' "$5" > "$D/cuerpo-issue"; exit 0 ;;
@@ -158,7 +177,13 @@ test('mergear-pr: si el push falla, no se mergea', () => {
 
 // ── La marca merge-blocked ──
 
-const { comandoDeMarcarPr, comandoDeMarcarIssue, comandoDePublicarPr } = nucleoPuro(['comandoDeMarcarPr', 'comandoDeMarcarIssue', 'comandoDePublicarPr'])
+const { comandoDeMarcarPr, comandoDeMarcarIssue, comandoDePublicarPr, comandoDePrFinal, comandoDeSumarCloses } = nucleoPuro([
+  'comandoDeMarcarPr',
+  'comandoDeMarcarIssue',
+  'comandoDePublicarPr',
+  'comandoDePrFinal',
+  'comandoDeSumarCloses',
+])
 // Un texto como los que escriben los modelos: backticks, `$(`, comillas de los dos tipos.
 const PELIGROSO = "arreglé `touch pwned1` y $(touch pwned2) en it's \"citado\" — ${HOME}"
 // Cada comando hace `cd` antes: un `touch` ejecutado caería en el escenario, el repo o el worktree.
@@ -215,6 +240,59 @@ for (const sh of shells) {
     assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), titulo)
     assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `${cuerpo}\n`)
     assert.ok(sinEjecutar(e))
+  })
+
+  test(`PR final (${sh}): draft con título y cuerpo tal cual, sin que el shell ejecute nada`, () => {
+    const e = escenario()
+    const titulo = `#1,#2 — pipeline ${PELIGROSO}`
+    const cuerpo = `Scope x\n\n## Sugerencias de seguimiento\n- [PR #500] ${PELIGROSO} $(touch pwned3)\n\nPR integrador. 🤖`
+    execFileSync(sh, ['-c', comandoDePrFinal({ dir: e.repo, base: 'main', rama: 'batch/sim', titulo, cuerpo })], { env: e.env, cwd: e.d })
+    assert.match(e.llamadas().find((l) => l.startsWith('gh pr create')), /^gh pr create --draft --base main --head batch\/sim --title /)
+    assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), titulo)
+    assert.equal(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8'), `${cuerpo}\n`)
+    assert.ok(sinEjecutar(e))
+  })
+
+  test(`PR final ya abierto (${sh}): se suman solo los Closes que faltan, sin tocar el resto del cuerpo`, () => {
+    const e = escenario()
+    writeFileSync(join(e.d, 'prs.json'), '[{"number":777,"state":"OPEN"}]')
+    const existente = 'Resumen de una corrida anterior con `código` y $(touch pwned1)\nCloses #12, y algo más\n'
+    writeFileSync(join(e.d, 'cuerpo-existente'), existente)
+    execFileSync(sh, ['-c', comandoDeSumarCloses({ dir: e.repo, base: 'main', rama: 'batch/sim', issues: [1, 12, 3] })], { env: e.env, cwd: e.d })
+    assert.ok(e.llamadas().includes('gh pr edit 777 --body-file ' + e.llamadas().find((l) => l.startsWith('gh pr edit')).split(' ').pop()))
+    assert.equal(readFileSync(join(e.d, 'cuerpo-editado'), 'utf8'), `${existente}Closes #1\nCloses #3\n`, '#12 ya estaba; #1 no se confunde con #12')
+    assert.ok(sinEjecutar(e))
+  })
+
+  test(`PR final ya abierto (${sh}): sin PR abierto no se edita nada`, () => {
+    const e = escenario()
+    writeFileSync(join(e.d, 'cuerpo-existente'), 'cuerpo de otro PR\n')
+    spawnSync(sh, ['-c', comandoDeSumarCloses({ dir: e.repo, base: 'main', rama: 'batch/sim', issues: [1] })], { env: e.env, cwd: e.d })
+    assert.ok(!e.llamadas().some((l) => l.startsWith('gh pr edit')))
+  })
+
+  test(`PR final ya abierto (${sh}): si no falta ningún Closes, no se edita`, () => {
+    const e = escenario()
+    writeFileSync(join(e.d, 'prs.json'), '[{"number":777,"state":"OPEN"}]')
+    writeFileSync(join(e.d, 'cuerpo-existente'), 'Closes #1\nCloses #2\n')
+    const salida = execFileSync(sh, ['-c', comandoDeSumarCloses({ dir: e.repo, base: 'main', rama: 'batch/sim', issues: [1, 2] })], { env: e.env, cwd: e.d, encoding: 'utf8' })
+    assert.match(salida, /SIN_CAMBIOS/)
+    assert.ok(!e.llamadas().some((l) => l.startsWith('gh pr edit')))
+  })
+
+  test(`PR final (${sh}): si ya hay uno abierto o mergeado, no se crea otro`, () => {
+    const e = escenario()
+    writeFileSync(join(e.d, 'prs.json'), '[{"number":5,"state":"CLOSED"},{"number":999,"state":"MERGED"}]')
+    const salida = execFileSync(sh, ['-c', comandoDePrFinal({ dir: e.repo, base: 'main', rama: 'batch/sim', titulo: 't', cuerpo: 'c' })], { env: e.env, cwd: e.d, encoding: 'utf8' })
+    assert.equal(salida.trim(), 'YA_EXISTE 999 MERGED')
+    assert.ok(!e.llamadas().some((l) => l.startsWith('gh pr create')))
+  })
+
+  test(`PR final (${sh}): uno cerrado sin mergear no cuenta, se crea el draft`, () => {
+    const e = escenario()
+    writeFileSync(join(e.d, 'prs.json'), '[{"number":5,"state":"CLOSED"}]')
+    execFileSync(sh, ['-c', comandoDePrFinal({ dir: e.repo, base: 'main', rama: 'batch/sim', titulo: 't', cuerpo: 'c' })], { env: e.env, cwd: e.d })
+    assert.ok(e.llamadas().some((l) => l.startsWith('gh pr create --draft')))
   })
 }
 
@@ -277,5 +355,49 @@ test('publicar arreglos: los títulos que escribió el aplicador llegan tal cual
     assert.ok(readFileSync(join(e.d, 'cuerpo-pr'), 'utf8').includes(`\n- ${titulo}\n`), sh)
     assert.ok(e.llamadas().find((l) => l.startsWith('gh pr create')).includes('--head review/sim-1018-pr500 --label afk-agent-pr --label review-fix'), sh)
     assert.ok(sinEjecutar(e), sh)
+  }
+})
+
+test('PR final: el comando que el motor manda lleva issues, Closes, revisión y seguimientos tal cual', async () => {
+  const seguimiento = { titulo: 'renombrar `x()` $(touch pwned1)', ubicacion: 'src/a.ts:3', severidad: 'baja', por_que: 'p', decision: 'seguimiento', razon: "it's `estilo` $(touch pwned2)" }
+  const mundo = crearMundo({ issues: { 1: { titulo: 'feat: `pliegos` $(touch pwned3)' }, 2: {} } })
+  mundo.hallazgos = (pr) => (pr === 500 ? [seguimiento] : [])
+  const { resultado, llamadas } = await correrMotor({ mundo })
+  assert.equal(resultado.status, 'DONE')
+  const prompt = conLabel(llamadas, /^serializer:pr-final$/)[0].prompt
+  // El único texto entre comillas dobles que queda es fijo: el pedido a CodeRabbit.
+  assert.doesNotMatch(prompt.replace('--body "@coderabbitai review"', ''), /--title "|--body "/)
+  // La identidad de trabajo la deciden los dos comandos del motor; no hay otro `gh pr list` suelto.
+  assert.equal(prompt.split('gh pr list').length - 1, 2, 'solo el chequeo del comando que crea y el de sumar Closes')
+  const pr1 = [...mundo.prs.entries()].find(([, p]) => p.issue === 1)[0]
+  for (const sh of shells) {
+    const e = escenario()
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'E=\\$\\(gh pr list', e.repo)], { env: e.env, cwd: e.d })
+    assert.equal(readFileSync(join(e.d, 'titulo'), 'utf8'), '#1,#2 — pipeline sim-1018', sh)
+    const cuerpo = readFileSync(join(e.d, 'cuerpo-pr'), 'utf8')
+    for (const linea of [
+      `- #1 feat: \`pliegos\` $(touch pwned3) — PR #${pr1}`,
+      '## Issues cerradas',
+      'Closes #1',
+      'Closes #2',
+      '## Revisión por PR',
+      '## Sugerencias de seguimiento',
+      `- [PR #500] ${seguimiento.titulo} (src/a.ts:3): ${seguimiento.razon}`,
+      'PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+    ])
+      assert.ok(cuerpo.split('\n').includes(linea), `${sh}: falta «${linea}» en\n${cuerpo}`)
+    assert.ok(sinEjecutar(e), sh)
+
+    // Un PR final cerrado sin mergear no cuenta: se crea el draft.
+    const e1 = escenario()
+    writeFileSync(join(e1.d, 'prs.json'), '[{"number":5,"state":"CLOSED"}]')
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'E=\\$\\(gh pr list', e1.repo)], { env: e1.env, cwd: e1.d })
+    assert.ok(e1.llamadas().some((l) => l.startsWith('gh pr create --draft')), sh)
+
+    const e2 = escenario()
+    writeFileSync(join(e2.d, 'prs.json'), '[{"number":999,"state":"OPEN"}]')
+    writeFileSync(join(e2.d, 'cuerpo-existente'), 'cuerpo viejo\nCloses #1\n')
+    execFileSync(sh, ['-c', comandoDelPrompt(prompt, 'P=\\$\\(gh pr list', e2.repo)], { env: e2.env, cwd: e2.d })
+    assert.equal(readFileSync(join(e2.d, 'cuerpo-editado'), 'utf8'), 'cuerpo viejo\nCloses #1\nCloses #2\n', sh)
   }
 })

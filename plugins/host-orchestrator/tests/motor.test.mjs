@@ -542,6 +542,10 @@ test('relanzamiento: un PR mergeado por otra corrida sin la etiqueta de revisado
   const { llamadas } = await correrMotor({ mundo })
   assert.equal(conLabel(llamadas, /^revisor:pr400$/).length, 1)
   assert.equal(conLabel(llamadas, /^implementer:#1$/).length, 0, 'lo mergeado no se reimplementa')
+  // El PR final lista y cierra también lo que entró en la corrida anterior (lo ve el scout DONE).
+  const final = conLabel(llamadas, /^serializer:pr-final$/)[0].prompt
+  assert.ok(final.includes("'- #1 issue 1 — PR #400'"), 'la issue de la corrida anterior, con su PR')
+  assert.ok(final.includes("'Closes #1'"))
 })
 
 test('Haiku por defecto en scout y serializer; el validator en Haiku solo después de ver los tests del hook', async () => {
@@ -615,7 +619,8 @@ test('arreglos de revisión merge-blocked: el PR revisado no dice "aplicado" y q
   const { resultado, llamadas } = await correrMotor({ mundo })
   assert.ok(resultado.para_leo.some((l) => /#501/.test(l)))
   const final = conLabel(llamadas, /^serializer:pr-final$/)[0]
-  if (final) assert.doesNotMatch(final.prompt.match(/PR #500:[^\n]*/)?.[0] ?? '', /mergead/)
+  // Cada línea del cuerpo es un argumento entre comillas simples: la de #500 termina en la comilla.
+  if (final) assert.doesNotMatch(final.prompt.match(/PR #500:[^']*/)?.[0] ?? '', /mergead/)
 })
 
 test('la etiqueta pipeline-revisado se pone cuando los arreglos ya entraron', async () => {

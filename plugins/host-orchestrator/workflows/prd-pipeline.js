@@ -387,6 +387,20 @@ function comandoDePublicarPr({ worktree, branch, base, labels, titulo, cuerpo, c
   return `cd ${worktree} && git push -u origin ${branch} && ${textoAArchivo(cuerpo)} && gh pr create --base ${base}${conHead ? ` --head ${branch}` : ''}${labels.map((l) => ` --label ${l}`).join('')} --title ${entreComillas(titulo)} --body-file "$F"`
 }
 
+// El PR final (§3.2), draft de la integradora hacia la base: título y cuerpo los arma
+// el motor, como en los demás PRs. Un PR final abierto o mergeado (uno cerrado sin
+// mergear no cuenta) ya es el trabajo hecho: el comando no crea otro.
+const prFinalExistente = (base, rama) => `gh pr list --head ${rama} --base ${base} --state all --json number,state --jq '.[] | select(.state != "CLOSED") | "\\(.number) \\(.state)"'`
+function comandoDePrFinal({ dir, base, rama, titulo, cuerpo }) {
+  return `cd ${dir} && E=$(${prFinalExistente(base, rama)}) && if [ -n "$E" ]; then echo "YA_EXISTE $E"; else ${textoAArchivo(cuerpo)} && gh pr create --draft --base ${base} --head ${rama} --title ${entreComillas(titulo)} --body-file "$F"; fi`
+}
+
+// Un PR final que ya estaba abierto (un relanzamiento sobre la misma rama): se le suman
+// los `Closes #` que le falten, sin tocar el resto de su cuerpo.
+function comandoDeSumarCloses({ dir, base, rama, issues }) {
+  return `cd ${dir} && P=$(gh pr list --head ${rama} --base ${base} --state open --json number --jq '.[0].number') && [ -n "$P" ] && F=$(mktemp) && gh pr view "$P" --json body --jq .body > "$F" && S=0 && for N in ${issues.join(' ')}; do grep -qE '(^|[^0-9A-Za-z])Closes #'"$N"'([^0-9]|$)' "$F" || { printf 'Closes #%s\\n' "$N" >> "$F"; S=1; }; done && if [ "$S" = 1 ]; then gh pr edit "$P" --body-file "$F"; else echo SIN_CAMBIOS; fi`
+}
+
 // Marcar un PR para Leo (§3.16). La etiqueta y el comentario van adentro de un `case`
 // sobre el estado que reporta GitHub: a un PR MERGED no se le pone nada, aunque el
 // agente que corre el comando se equivoque.
@@ -973,7 +987,9 @@ const revisiones = [] // un registro por PR revisado: qué encontró el revisor,
 const bugsReales = []
 const bloqueadas = []
 const pendientes = []
-const cerradas = [] // issues con PR mergeado a la integradora → `Closes #` del PR final
+// Issues con PR mergeado a la integradora → `Closes #` y lista del PR final: n → { titulo, pr }.
+const cerradas = new Map()
+const anotarCerrada = (n, titulo, pr) => cerradas.set(n, { titulo: titulo ?? cerradas.get(n)?.titulo, pr: pr ?? cerradas.get(n)?.pr })
 const seguimientos = []
 const humanos = []
 const avisos = [] // cosas que el motor vio salir mal y no puede deshacer
@@ -1028,7 +1044,7 @@ const algoEnVuelo = () => enVuelo.size > 0 || carrilMerge !== null || carrilRevi
 
 const registrarScout = (s) => {
   for (const x of s?.specs ?? []) specsDelScope.add(x)
-  for (const i of s?.issues ?? []) if (i.bucket === 'DONE') cerradas.push(i.number)
+  for (const i of s?.issues ?? []) if (i.bucket === 'DONE') anotarCerrada(i.number, i.title, i.pr_number)
 }
 
 function terminar(clave) {
@@ -1365,7 +1381,7 @@ async function integrado(item, r, aprobado) {
   log(`merge PR #${item.pr}: ${r.status}`)
   mergesReporte.push({ pr: item.pr, resultado: r.status === 'ya_estaba' ? 'ya_estaba' : 'mergeado' })
   registro.anotar(`pr${item.pr}`, { ultimo: `merge ${r.status}` })
-  if (!item.esFix) cerradas.push(item.issue)
+  if (!item.esFix) anotarCerrada(item.issue, item.titulo, item.pr)
   await fijarBase(r.commit_integracion, r.arbol_integracion, `pr${item.pr}`, { confirmado, vigilar: !confirmado })
   if (item.esFix) await cerrarRevisionDeArreglos(item, `mergeados en el PR #${item.pr}`)
   else encolarRevision({ pr: item.pr, issue: item.issue, titulo: item.titulo })
@@ -1780,30 +1796,61 @@ while (true) {
 phase('Cierre')
 let prFinal = null
 if (allDone) {
-  const issuesCierre = [...new Set(cerradas)]
-  const bloqueCierre = issuesCierre.length
-    ? `\n\nCLAVE — autocierre: el body DEBE incluir, en líneas propias, exactamente: ${issuesCierre.map((n) => `Closes #${n}`).join(', ')}. Son las issues cuyo PR por-issue fue contra la rama integradora (no la default), donde GitHub ignora el "Closes"; recién este PR final va a la default branch, así que ES el único lugar donde el autocierre surte efecto al mergearse. NO omitas ninguna ni uses otra redacción (nada de "issues cerradas: #N" en prosa — tiene que ser la keyword "Closes #N" que GitHub reconoce).`
-    : ''
-  const bloqueRevision = revisiones.length
-    ? `\n\nEl body lleva una sección "## Revisión por PR" con estas líneas tal cual (un revisor y, si hizo falta, un aplicador por PR; el detalle está comentado en cada PR):\n${revisiones
-        .map((r) =>
-          r.hallazgos === null
-            ? `   - PR #${r.pr}: ${r.estado ?? 'la revisión no corrió'}`
-            : `   - PR #${r.pr}: ${r.hallazgos.length} hallazgo(s), ${r.aplicados.length} aplicado(s)${r.fallados.length ? `, ${r.fallados.length} sin aplicar` : ''}${r.pr_arreglos ? ` (arreglos en el PR #${r.pr_arreglos}: ${r.arreglos_estado ?? 'pendientes'})` : ''}`
-        )
-        .join('\n')}`
-    : ''
-  const bloqueSeguimiento = seguimientos.length
-    ? `\n\nEl body lleva además una sección "## Sugerencias de seguimiento" con estas líneas tal cual (la revisión las dejó debajo del umbral de aplicar: no se aplicaron):\n${seguimientos
-        .map((r) => `   - [PR #${r.pr}] ${r.titulo}${r.ubicacion ? ` (${r.ubicacion})` : ''}: ${r.razon}`)
-        .join('\n')}`
-    : ''
+  const issuesCierre = [...cerradas.keys()]
+  // El cuerpo lo arma el motor con lo que ya sabe (§3.2); el serializer lo publica tal cual,
+  // por archivo. Los títulos y razones de seguimiento los escribió el revisor.
+  const cuerpo = [
+    `Scope ${SCOPE_DESC}, pipeline ${A.runLabel}: rama ${RAMA} hacia ${BASE}, ${issuesCierre.length} issue(s) con su PR mergeado a la integradora.`,
+    ...(issuesCierre.length
+      ? [
+          '',
+          '## Issues cerradas',
+          ...issuesCierre.map((n) => {
+            const d = cerradas.get(n)
+            return `- #${n}${d.titulo ? ` ${d.titulo}` : ''}${d.pr ? ` — PR #${d.pr}` : ''}`
+          }),
+          '',
+          // Los PRs por issue fueron contra la integradora, donde GitHub ignora el "Closes":
+          // este PR, que va a la base, es el único lugar donde el autocierre surte efecto.
+          ...issuesCierre.map((n) => `Closes #${n}`),
+        ]
+      : []),
+    ...(revisiones.length
+      ? [
+          '',
+          '## Revisión por PR',
+          'Un revisor y, si hizo falta, un aplicador por PR; el detalle está comentado en cada PR.',
+          ...revisiones.map((r) =>
+            r.hallazgos === null
+              ? `- PR #${r.pr}: ${r.estado ?? 'la revisión no corrió'}`
+              : `- PR #${r.pr}: ${r.hallazgos.length} hallazgo(s), ${r.aplicados.length} aplicado(s)${r.fallados.length ? `, ${r.fallados.length} sin aplicar` : ''}${r.pr_arreglos ? ` (arreglos en el PR #${r.pr_arreglos}: ${r.arreglos_estado ?? 'pendientes'})` : ''}`
+          ),
+        ]
+      : []),
+    ...(seguimientos.length
+      ? [
+          '',
+          '## Sugerencias de seguimiento',
+          'La revisión las dejó debajo del umbral de aplicar: no se aplicaron.',
+          ...seguimientos.map((r) => `- [PR #${r.pr}] ${r.titulo}${r.ubicacion ? ` (${r.ubicacion})` : ''}: ${r.razon}`),
+        ]
+      : []),
+    '',
+    'PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+  ].join('\n')
   const cierre = await serializar(
-    `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}.
+    `Cerrar el pipeline: PR draft de ${RAMA} hacia ${BASE}. El título y el cuerpo ya los armó el motor: van entre comillas simples y por archivo, y el shell no interpreta nada de lo que dicen.
 1. cd ${WT_INTEGRACION} && git pull --ff-only
-2. CHECK identidad de trabajo: ¿ya existe PR (abierto o mergeado) ${RAMA} → ${BASE}? → reportá su número ('ya_estaba'). Si ya existe y está ABIERTO pero su body NO trae los "Closes #" de abajo, editalo con gh pr edit para agregarlos.
-3. Si no: gh pr create --draft --base ${BASE} --head ${RAMA} --title "${SCOPE_DESC} — pipeline ${A.runLabel}" --body con: resumen del scope, lista de issues cerradas con sus PRs (sacala de gh), y "PR integrador para botón verde de Leo. 🤖 Generated with [Claude Code](https://claude.com/claude-code)" (contexto audit: pr-final-create)${bloqueCierre}${bloqueRevision}${bloqueSeguimiento}
-4. Sobre el PR (nuevo o 'ya_estaba', si está ABIERTO): gh pr comment <numero> --body "@coderabbitai review" — CodeRabbit skipea drafts y bases no-default por config, el comentario fuerza la review externa; el T0 triagea sus observaciones después (contexto audit: pr-final-coderabbit). Idempotencia: si el PR ya tiene un comentario "@coderabbitai review", no dupliques.`,
+2. El PR draft, con este comando tal cual y entero (contexto audit: pr-final-create). Él mismo chequea la identidad de trabajo: si ya hay un PR final abierto o mergeado (uno cerrado sin mergear no cuenta), no crea otro e imprime YA_EXISTE <número> <estado>.
+   ${comandoDePrFinal({ dir: WT_INTEGRACION, base: BASE, rama: RAMA, titulo: `${SCOPE_DESC} — pipeline ${A.runLabel}`, cuerpo })}
+   → Si creó el PR: su número va en pr_number, status 'ok'.
+   → Si imprimió YA_EXISTE: ese número va en pr_number (con dos líneas, el de la que dice OPEN), status 'ya_estaba'.${
+      issuesCierre.length
+        ? ` Si dice OPEN, sumale los "Closes #" que le falten con este comando, tal cual y entero (contexto audit: pr-final-closes):
+   ${comandoDeSumarCloses({ dir: REPO, base: BASE, rama: RAMA, issues: issuesCierre })}`
+        : ''
+    }
+3. Sobre el PR (nuevo o 'ya_estaba', si está ABIERTO): gh pr comment <numero> --body "@coderabbitai review" — CodeRabbit skipea drafts y bases no-default por config, el comentario fuerza la review externa; el T0 triagea sus observaciones después (contexto audit: pr-final-coderabbit). Idempotencia: si el PR ya tiene un comentario "@coderabbitai review", no dupliques.`,
     'pr-final',
     'Cierre'
   )
